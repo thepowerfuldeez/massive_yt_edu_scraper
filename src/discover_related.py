@@ -1,7 +1,12 @@
+#patched
 #!/usr/bin/env python3
+#patched
 """
+#patched
 Exponential discovery via related videos and playlist walking.
+#patched
 Uses completed/queued videos as seeds → fetch related → find playlists → crawl playlists.
+#patched
 This is the key to going from 100K → 1M+ quality educational videos.
 """
 
