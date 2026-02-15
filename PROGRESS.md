@@ -1,35 +1,31 @@
-# Progress Log
+# Progress
 
-## 2026-02-15
+## Current Stats (2026-02-15)
+- **Completed:** 3,041 videos (1,852 hours)
+- **Pending:** 369,834 videos  
+- **Average speed:** 98x realtime (per GPU)
+- **Model:** distil-whisper/distil-large-v3.5
+- **Hardware:** 2x RTX 5090 + 2x RTX 4090
 
-### 14:00 — System Online
-- 4 GPU workers running with pipelined download (prefetch depth 3)
-- distil-whisper/distil-large-v3, chunk_length_s=30, batch_size 24/16
-- Average speed: 160x realtime per GPU
+## Recent Performance (v3.5 upgrade)
+- GPU 0 (5090): 51-61x realtime
+- GPU 1 (4090): 45-55x realtime  
+- GPU 2 (5090): 62-76x realtime
+- GPU 3 (4090): 60-72x realtime
+- Previous (v3): 33-40x realtime
 
-### 14:30 — Discovery Scaling
-- Initial queue: 52K videos
-- Two discovery scripts running in parallel
-- Queue grew to 172K+ within 30 minutes
+## Optimizations Applied
+- Upgraded distil-large-v3 → v3.5 (+10% speed)
+- Pre-load audio as numpy in prefetch threads (skip file I/O on GPU path)
+- 4 prefetch threads per GPU (was 2)
+- Batch DB claims (10 per round-trip)
+- Download as mp3 instead of wav (10x smaller)
+- Optimal batch sizes: bs=32 (5090), bs=24 (4090)
 
-### 15:00 — Quality Filter Added
-- Added ≥15min duration filter (filters shorts, clips, trailers)
-- Negative title filter (rejects music videos, gaming, ASMR, pranks, etc.)
-- Positive priority boost for educational keywords (lecture, course, university, etc.)
-- Deprioritized 87K short videos, 84K quality educational videos remain
-- Workers now prioritize ≥15min content
+## Dataset
+- HuggingFace: [thepowerfuldeez/massive-yt-edu-transcriptions](https://huggingface.co/datasets/thepowerfuldeez/massive-yt-edu-transcriptions)
+- Daily auto-push at 6am London
 
-### 15:30 — Status
-- **2,171 videos transcribed**
-- **~84K educational videos in queue (≥15min)**
-- **86K+ pending hours of audio**
-- Discovery scaling to 1M+ with quality filters
-- GitHub repo live: thepowerfuldeez/massive_yt_edu_scraper
-
-### Quality Strategy
-To reach 10B tokens of *educational* content:
-1. **Duration filter**: ≥15 minutes only (deep lectures, not clips)
-2. **Title filtering**: Reject non-educational (gaming, music, vlogs, ASMR)
-3. **Priority boosting**: Lectures, courses, university content get processed first
-4. **Source curation**: 140+ verified educational channels, known MOOC playlists
-5. **Multi-language**: 15+ languages for global educational coverage
+## Timeline
+- 2026-02-14: Project started, initial pipeline
+- 2026-02-15: 3K videos, v3.5 upgrade, 2x speed improvement, HF dataset published

@@ -8,12 +8,12 @@ Autonomous system to build a 100B+ token educational dataset from YouTube using 
 
 | Metric | Value |
 |--------|-------|
-| Videos transcribed | 2,886+ (growing) |
-| Audio hours | 1,676+ |
-| Estimated tokens | ~20M+ |
-| Videos in queue | 330K+ (growing) |
-| Throughput | **13,000 hours/day** on 4 GPUs |
-| Avg speed per GPU | 157x realtime |
+| Videos transcribed | 3,000+ (growing) |
+| Audio hours | 1,850+ |
+| Estimated tokens | ~25M+ |
+| Videos in queue | 370K+ (growing) |
+| Throughput | **~14,400 hours/day** on 4 GPUs |
+| Avg speed per GPU | 50-76x realtime |
 
 ## Architecture
 
@@ -29,9 +29,9 @@ Autonomous system to build a 100B+ token educational dataset from YouTube using 
 └─────────────────┘     └──────────┘     └──────────────────┘
 ```
 
-- **Pipelined GPU workers**: 2 download threads prefetch ahead per GPU — GPUs never idle
-- **SQLite single source of truth**: database IS the queue, deduplicated by video_id
-- **distil-whisper/distil-large-v3** via HuggingFace transformers pipeline
+- **Pipelined GPU workers**: 4 download threads prefetch ahead per GPU, pre-load audio as numpy arrays — GPUs never idle
+- **SQLite single source of truth**: database IS the queue, deduplicated by video_id, batch claims
+- **distil-whisper/distil-large-v3.5** via HuggingFace transformers pipeline
 - **Batched chunked inference** (`chunk_length_s=30`, `return_timestamps=True`)
 - **Quality filtering**: 40+ reject categories, 3-tier educational priority boosting
 
@@ -39,15 +39,15 @@ Autonomous system to build a 100B+ token educational dataset from YouTube using 
 
 With **4 GPUs** (2× RTX 5090 + 2× RTX 4090), the system achieves:
 
-- **13,000 hours of audio transcribed per day**
-- ~160x realtime per GPU (up to 200x on shorter segments)
-- Download-pipelined: GPUs stay at 30-100% utilization continuously
-- Estimated **1B tokens every 5 days** at current throughput
+- **~14,400 hours of audio transcribed per day**
+- 50-76x realtime per GPU on long-form content
+- Download-pipelined: 4 prefetch threads per GPU, numpy passthrough eliminates file I/O
+- Estimated **1B tokens per week** at current throughput
 
 | GPU | VRAM | Batch Size | Speed |
 |-----|------|-----------|-------|
-| RTX 5090 (×2) | 32GB | 24 | ~180x realtime |
-| RTX 4090 (×2) | 24GB | 16 | ~140x realtime |
+| RTX 5090 (×2) | 32GB | 32 | 51-76x realtime |
+| RTX 4090 (×2) | 24GB | 24 | 45-72x realtime |
 
 ## Quality Filtering
 
