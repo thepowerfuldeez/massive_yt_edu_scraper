@@ -18,9 +18,12 @@ def get_db():
 def claim_video():
     conn = get_db()
     try:
+        # Prioritize ≥15min educational content
         cur = conn.execute(
             "UPDATE videos SET status='processing', processing_started_at=datetime('now') "
-            "WHERE video_id = (SELECT video_id FROM videos WHERE status='pending' ORDER BY priority DESC, id LIMIT 1) "
+            "WHERE video_id = (SELECT video_id FROM videos WHERE status='pending' "
+            "AND (duration_seconds >= 900 OR duration_seconds IS NULL OR duration_seconds = 0) "
+            "ORDER BY priority DESC, id LIMIT 1) "
             "RETURNING video_id, title"
         )
         row = cur.fetchone()
