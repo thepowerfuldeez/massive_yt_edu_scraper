@@ -1,0 +1,10 @@
+*.db
+*.wav
+*.mp3
+*.ogg
+*.log
+tmp_gpu*/
+venv/
+__pycache__/
+*.pyc
+.env
