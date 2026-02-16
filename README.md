@@ -6,9 +6,10 @@ Large-scale educational video transcription pipeline targeting **1M hours** of Y
 
 | Metric | Value |
 |--------|-------|
-| **Completed** | 8,600+ transcriptions (7,000+ audio hours) |
-| **Queue** | 1M+ pending videos (958K hours) |
-| **Throughput** | ~800 audio hours per wall-clock hour |
+| **Completed** | 12,000+ transcriptions (~10,500 audio hours) |
+| **Tokens** | ~116M estimated (targeting 10B+) |
+| **Queue** | 1.08M pending videos |
+| **Throughput** | ~700 audio hours per wall-clock hour |
 | **GPUs** | 2× RTX 5090 + 2× RTX 4090 |
 
 ## Architecture
@@ -42,13 +43,14 @@ Large-scale educational video transcription pipeline targeting **1M hours** of Y
 - **beam_size=1, condition_on_previous_text=False**: max speed for batch workload
 - **6 prefetch threads per GPU**: download pipeline stays saturated
 - **SQLite queue**: atomic `UPDATE...RETURNING` claims, WAL mode, batch claims
+- **JS runtime for yt-dlp**: `--js-runtimes node` required since Feb 2026 YouTube changes
 
 ### Performance (per GPU)
 
 | GPU | Avg Speed | VRAM |
 |-----|-----------|------|
-| RTX 5090 | ~250× realtime | 2.5 GB |
-| RTX 4090 | ~215× realtime | 2.4 GB |
+| RTX 5090 | ~200× realtime | 2.5 GB |
+| RTX 4090 | ~180× realtime | 2.4 GB |
 
 ## Structure
 
@@ -74,6 +76,13 @@ Published on HuggingFace: [`thepowerfuldeez/massive-yt-edu-transcriptions`](http
 
 Daily auto-push at 6am London.
 
+## Requirements
+
+- Python 3.10+
+- faster-whisper, ctranslate2
+- yt-dlp (with node.js for JS runtime)
+- ffmpeg, librosa, numpy
+
 ## Usage
 
 ```bash
@@ -86,10 +95,3 @@ Daily auto-push at 6am London.
 # Export to HuggingFace
 python3 src/export_hf.py
 ```
-
-## Requirements
-
-- Python 3.10+
-- faster-whisper, ctranslate2
-- yt-dlp, ffmpeg
-- librosa, numpy
