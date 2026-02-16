@@ -16,9 +16,9 @@ DB_PATH = os.path.expanduser("~/academic_transcriptions/massive_production.db")
 WORK_DIR = os.path.expanduser("~/academic_transcriptions")
 YTDLP = os.path.join(WORK_DIR, "yt-dlp")
 MODEL_ID = "distil-large-v3.5"
-PREFETCH_DEPTH = 5
-PREFETCH_THREADS = 4
-CLAIM_BATCH = 10
+PREFETCH_DEPTH = 15
+PREFETCH_THREADS = 8
+CLAIM_BATCH = 20
 AUDIO_SPEED = 1.2  # Speed up audio by 20%
 
 def get_db():
@@ -94,7 +94,8 @@ def download_and_load(video_id, tmp_dir):
             # Speed up audio by 1.2x using ffmpeg atempo filter
             "--postprocessor-args", f"ffmpeg:-filter:a atempo={AUDIO_SPEED}",
             "-o", out_template, "--no-playlist",
-            "--socket-timeout", "30", "--retries", "2", "--no-warnings",
+            "--concurrent-fragments", "4",
+            "--socket-timeout", "20", "--retries", "3", "--no-warnings", "--no-check-certificates",
             f"https://www.youtube.com/watch?v={video_id}"
         ]
         subprocess.run(cmd, capture_output=True, text=True, timeout=180, cwd=WORK_DIR)
