@@ -48,14 +48,14 @@ def export_jsonl():
                 print(f"  Writing {fname}...")
             
             record = {
-                "video_id": row["video_id"],
-                "title": row["title"],
-                "text": row["transcript"],
-                "duration_seconds": row["duration_seconds"],
+                "video_id": row["video_id"] or "",
+                "title": row["title"] or "",
+                "text": row["transcript"] or "",
+                "duration_seconds": int(row["duration_seconds"] or 0),
                 "source": row["university"] or row["course"] or "",
-                "url": row["url"],
-                "priority": row["priority"],
-                "transcription_speed": round(row["speed_ratio"], 1) if row["speed_ratio"] else None,
+                "url": row["url"] or "",
+                "priority": int(row["priority"] or 5),
+                "speed_ratio": round(float(row["speed_ratio"] or 0), 1),
             }
             writer.write(json.dumps(record, ensure_ascii=False) + '\n')
             exported += 1

@@ -1,14 +1,16 @@
 #!/bin/bash
 # Launch all discovery scripts, skip any already running
-cd /home/george/academic_transcriptions
+# Cache files go to ~/academic_transcriptions (data dir, not in repo)
+REPO=~/million-hour-transcription
+DATA=~/academic_transcriptions
 
-for script in discover_related.py discover_10M.py scale_to_1M.py discover_aggressive.py discover_mega.py; do
-    name=$(basename $script .py)
+for script in discover_related discover_10M scale_to_1M discover_aggressive discover_mega; do
     if pgrep -f "$script" > /dev/null 2>&1; then
-        echo "[ok] $name already running"
+        echo "[ok] $script already running"
     else
-        echo "[start] $name"
-        nohup python3 -u /home/george/academic_transcriptions/$script > /tmp/${name}.log 2>&1 &
+        echo "[start] $script"
+        cd "$DATA"
+        nohup python3 -u "$REPO/src/${script}.py" > /tmp/${script}.log 2>&1 &
     fi
 done
 
