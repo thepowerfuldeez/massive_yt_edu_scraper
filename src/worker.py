@@ -90,7 +90,7 @@ def download_and_load(video_id, tmp_dir):
     out_path = os.path.join(tmp_dir, f"{video_id}.mp3")
     try:
         cmd = [
-            YTDLP, "-x", "--audio-format", "mp3", "--audio-quality", "5",
+            YTDLP, "--js-runtimes", "node", "-x", "--audio-format", "mp3", "--audio-quality", "5",
             # Speed up audio by 1.2x using ffmpeg atempo filter
             "--postprocessor-args", f"ffmpeg:-filter:a atempo={AUDIO_SPEED}",
             "-o", out_template, "--no-playlist",
