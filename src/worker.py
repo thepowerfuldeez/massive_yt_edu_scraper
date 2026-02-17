@@ -151,7 +151,20 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
                 "--no-warnings", "--no-check-certificates",
                 f"https://www.youtube.com/watch?v={video_id}",
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180, cwd=WORK_DIR)
+            # Use Popen + manual timeout to kill entire process group on timeout
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True, cwd=WORK_DIR, start_new_session=True)
+            try:
+                proc.communicate(timeout=180)
+            except subprocess.TimeoutExpired:
+                # Kill entire process group (yt-dlp + ffmpeg children)
+                import signal
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    proc.kill()
+                proc.wait()
+                raise
 
             # Find the downloaded file (could be .opus, .webm, .m4a, .ogg)
             matches = [f for f in glob.glob(os.path.join(tmp_dir, f"{video_id}.*"))
