@@ -1,20 +1,19 @@
 #!/bin/bash
-# Launch all discovery scripts, skip any already running
-# Cache files go to ~/academic_transcriptions (data dir, not in repo)
-REPO=~/million-hour-transcription
-DATA=~/academic_transcriptions
+# Launch discovery crawlers
+cd ~/million-hour-transcription
+source ~/vllm-env/bin/activate
 
-for script in discover_related discover_10M scale_to_1M discover_aggressive discover_mega; do
-    if pgrep -f "$script" > /dev/null 2>&1; then
-        echo "[ok] $script already running"
-    else
-        echo "[start] $script"
-        cd "$DATA"
-        nohup python3 -u "$REPO/src/${script}.py" > /tmp/${script}.log 2>&1 &
-    fi
-done
+# Kill old discovery processes
+pkill -f "discover_channels_10M.py" 2>/dev/null
+pkill -f "discover_related.py" 2>/dev/null
+sleep 1
 
-sleep 2
-echo ""
-echo "Running discovery scripts:"
-ps aux | grep -E "discover_|scale_to" | grep python | grep -v grep | awk '{print "  " $12, $13}'
+# Channel crawler (the main discovery engine for 10M target)
+nohup python3 -u src/discover_channels_10M.py > /tmp/discover_channels_1.log 2>&1 &
+echo "[discovery] Channel crawler started (PID: $!)"
+
+# Related video crawler (exponential discovery from existing videos)
+nohup python3 -u src/discover_related.py > /tmp/discover_related.log 2>&1 &
+echo "[discovery] Related crawler started (PID: $!)"
+
+echo "[discovery] All crawlers running"
