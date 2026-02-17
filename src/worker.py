@@ -19,8 +19,8 @@ DB_PATH = os.path.expanduser("~/academic_transcriptions/massive_production.db")
 WORK_DIR = os.path.expanduser("~/academic_transcriptions")
 YTDLP = os.path.join(WORK_DIR, "yt-dlp")
 MODEL_ID = "distil-large-v3.5"
-PREFETCH_DEPTH = 10
-PREFETCH_THREADS = 2
+PREFETCH_DEPTH = 5
+PREFETCH_THREADS = 1
 CLAIM_BATCH = 15
 AUDIO_SPEED = 1.2
 MAX_DOWNLOAD_RETRIES = 3
@@ -139,7 +139,7 @@ def download_and_load(video_id, tmp_dir, cookie_file=None):
                 "--no-warnings", "--no-check-certificates",
                 f"https://www.youtube.com/watch?v={video_id}",
             ]
-            subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=WORK_DIR)
+            subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=WORK_DIR)
 
             if not os.path.exists(out_path):
                 matches = glob.glob(os.path.join(tmp_dir, f"{video_id}.*"))
