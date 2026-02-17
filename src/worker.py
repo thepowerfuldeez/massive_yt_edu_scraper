@@ -25,17 +25,34 @@ CLAIM_BATCH = 15
 AUDIO_SPEED = 1.2
 MAX_DOWNLOAD_RETRIES = 3
 
-# Per-GPU cookie file to avoid concurrent write corruption by yt-dlp.
-# yt-dlp rewrites cookie files on each run — sharing one file across threads causes corruption.
-# Place a master cookie file as cookies_master.txt, then copy per-GPU:
-#   for i in 0 1 2 3; do cp cookies_master.txt cookies_gpu.txt; done
-COOKIE_FILE = os.path.join(WORK_DIR, f"cookies_gpu{GPU_ID}.txt")
-if not os.path.exists(COOKIE_FILE):
-    # Fallback: try any cookies file
+# Per-thread cookie files to avoid concurrent write corruption by yt-dlp.
+# yt-dlp rewrites cookie files on each run — sharing across threads causes corruption.
+# We copy from a master file to per-thread copies on startup.
+COOKIE_MASTER = None
+for candidate in [
+    os.path.join(WORK_DIR, "cookies_burner.txt"),
+    os.path.join(WORK_DIR, "cookies_master.txt"),
+    os.path.join(WORK_DIR, "cookies.txt"),
+]:
+    if os.path.exists(candidate):
+        COOKIE_MASTER = candidate
+        break
+if not COOKIE_MASTER:
     candidates = sorted(glob.glob(os.path.join(WORK_DIR, "cookies*.txt")))
-    COOKIE_FILE = candidates[0] if candidates else None
-if COOKIE_FILE:
-    print(f"[GPU {GPU_ID}] Using cookies: {os.path.basename(COOKIE_FILE)}", flush=True)
+    COOKIE_MASTER = candidates[0] if candidates else None
+
+import shutil
+
+def get_thread_cookie_file(thread_idx):
+    """Return a per-thread cookie file path, copied fresh from master."""
+    if not COOKIE_MASTER:
+        return None
+    path = os.path.join(WORK_DIR, f"cookies_gpu{GPU_ID}_t{thread_idx}.txt")
+    shutil.copy2(COOKIE_MASTER, path)
+    return path
+
+if COOKIE_MASTER:
+    print(f"[GPU {GPU_ID}] Cookie master: {os.path.basename(COOKIE_MASTER)}", flush=True)
 else:
     print(f"[GPU {GPU_ID}] WARNING: No cookie files found in {WORK_DIR}", flush=True)
 
@@ -103,7 +120,7 @@ def mark_error(video_id, error):
 
 
 # === Download ===
-def download_and_load(video_id, tmp_dir):
+def download_and_load(video_id, tmp_dir, cookie_file=None):
     """Download audio at 1.2x speed, return (audio_array, sr, original_duration) or None."""
     import librosa
     out_template = os.path.join(tmp_dir, f"{video_id}.%(ext)s")
@@ -112,8 +129,8 @@ def download_and_load(video_id, tmp_dir):
     for attempt in range(MAX_DOWNLOAD_RETRIES):
         try:
             cmd = [YTDLP, "--js-runtimes", "node"]
-            if COOKIE_FILE:
-                cmd += ["--cookies", COOKIE_FILE]
+            if cookie_file:
+                cmd += ["--cookies", cookie_file]
             cmd += [
                 "-x", "--audio-format", "mp3", "--audio-quality", "5",
                 "--postprocessor-args", f"ffmpeg:-filter:a atempo={AUDIO_SPEED}",
@@ -167,13 +184,15 @@ tmp_dir = os.path.join(WORK_DIR, f"tmp_gpu{GPU_ID}")
 os.makedirs(tmp_dir, exist_ok=True)
 
 
-def prefetcher():
+def prefetcher(thread_idx):
+    cookie_file = get_thread_cookie_file(thread_idx)
     try:
         import librosa  # noqa: F811
     except Exception as e:
         print(f"[GPU {GPU_ID}] Prefetch init failed: {e}", flush=True)
         return
 
+    print(f"[GPU {GPU_ID}] Prefetch thread {thread_idx} started", flush=True)
     while True:
         try:
             if prefetch_q.qsize() >= PREFETCH_DEPTH:
@@ -186,7 +205,7 @@ def prefetcher():
                 continue
 
             vid, title = row
-            result = download_and_load(vid, tmp_dir)
+            result = download_and_load(vid, tmp_dir, cookie_file=cookie_file)
             if result is None:
                 mark_error(vid, "download_failed")
                 continue
@@ -203,7 +222,7 @@ def prefetcher():
 
 
 for _i in range(PREFETCH_THREADS):
-    threading.Thread(target=prefetcher, daemon=True).start()
+    threading.Thread(target=prefetcher, args=(_i,), daemon=True).start()
 
 # === Load model ===
 print(f"[GPU {GPU_ID}] Loading faster-whisper {MODEL_ID} "
