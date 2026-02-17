@@ -8,7 +8,7 @@ Optimizations over HF pipeline worker:
 - condition_on_previous_text=False: faster, no cross-segment dependency
 - Combined: ~2x total throughput improvement over HF pipeline
 """
-import os, sys, time, sqlite3, subprocess, glob, threading, queue, traceback
+import os, sys, time, random, sqlite3, subprocess, glob, threading, queue, traceback
 import numpy as np
 
 GPU_ID = int(sys.argv[1]) if len(sys.argv) > 1 else 0
@@ -79,47 +79,57 @@ def mark_error(video_id, error):
     conn.commit()
     conn.close()
 
-def download_and_load(video_id, tmp_dir):
+def download_and_load(video_id, tmp_dir, max_retries=3):
     """Download audio at 1.2x speed and load as numpy array.
     
     Uses yt-dlp postprocessor args to speed up audio via ffmpeg atempo filter.
-    This gives us 20% less audio to transcribe with negligible quality loss for speech.
+    Retries with exponential backoff on failure (YouTube rate limiting).
     """
     import librosa
     out_template = os.path.join(tmp_dir, f"{video_id}.%(ext)s")
     out_path = os.path.join(tmp_dir, f"{video_id}.mp3")
-    try:
-        cmd = [
-            YTDLP, "--js-runtimes", "node", "-x", "--audio-format", "mp3", "--audio-quality", "5",
-            # Speed up audio by 1.2x using ffmpeg atempo filter
-            "--postprocessor-args", f"ffmpeg:-filter:a atempo={AUDIO_SPEED}",
-            "-o", out_template, "--no-playlist",
-            "--socket-timeout", "20", "--retries", "3", "--no-warnings", "--no-check-certificates",
-            f"https://www.youtube.com/watch?v={video_id}"
-        ]
-        subprocess.run(cmd, capture_output=True, text=True, timeout=180, cwd=WORK_DIR)
-        
-        if not os.path.exists(out_path):
-            matches = glob.glob(os.path.join(tmp_dir, f"{video_id}.*"))
-            if matches:
-                out_path = matches[0]
-            else:
-                return None
-        
-        audio, sr = librosa.load(out_path, sr=16000, mono=True)
-        # Duration of sped-up audio
-        sped_duration = len(audio) / sr
-        # Original duration (before speedup) for DB
-        original_duration = sped_duration * AUDIO_SPEED
-        
-        try: os.unlink(out_path)
-        except: pass
-        
-        return audio, sr, original_duration
-    except Exception as e:
-        try: os.unlink(out_path)
-        except: pass
-        return None
+    
+    for attempt in range(max_retries):
+        try:
+            cmd = [
+                YTDLP, "--js-runtimes", "node", "--cookies", os.path.join(WORK_DIR, "cookies.txt"), "-x", "--audio-format", "mp3", "--audio-quality", "5",
+                "--postprocessor-args", f"ffmpeg:-filter:a atempo={AUDIO_SPEED}",
+                "-o", out_template, "--no-playlist",
+                "--socket-timeout", "30", "--retries", "5", "--no-warnings", "--no-check-certificates",
+                f"https://www.youtube.com/watch?v={video_id}"
+            ]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=WORK_DIR)
+            
+            if not os.path.exists(out_path):
+                matches = glob.glob(os.path.join(tmp_dir, f"{video_id}.*"))
+                if matches:
+                    out_path = matches[0]
+                else:
+                    if attempt < max_retries - 1:
+                        wait = (2 ** attempt) * 5 + random.random() * 5
+                        print(f"[GPU {GPU_ID}] Download failed {video_id}, retry {attempt+1}/{max_retries} in {wait:.0f}s", flush=True)
+                        time.sleep(wait)
+                        continue
+                    return None
+            
+            audio, sr = librosa.load(out_path, sr=16000, mono=True)
+            sped_duration = len(audio) / sr
+            original_duration = sped_duration * AUDIO_SPEED
+            
+            try: os.unlink(out_path)
+            except: pass
+            
+            return audio, sr, original_duration
+        except Exception as e:
+            try: os.unlink(out_path)
+            except: pass
+            if attempt < max_retries - 1:
+                wait = (2 ** attempt) * 5 + random.random() * 5
+                print(f"[GPU {GPU_ID}] Download error {video_id}: {e}, retry {attempt+1}/{max_retries} in {wait:.0f}s", flush=True)
+                time.sleep(wait)
+                continue
+            return None
+    return None
 
 # === Prefetch queue ===
 prefetch_q = queue.Queue(maxsize=PREFETCH_DEPTH + 1)
@@ -127,7 +137,14 @@ tmp_dir = os.path.join(WORK_DIR, f"tmp_gpu{GPU_ID}")
 os.makedirs(tmp_dir, exist_ok=True)
 
 def prefetcher():
-    import librosa
+    import sys
+    try:
+        print(f"[GPU {GPU_ID}] Prefetch thread starting...", flush=True)
+        import librosa
+        print(f"[GPU {GPU_ID}] Prefetch thread ready (librosa loaded)", flush=True)
+    except Exception as e:
+        print(f"[GPU {GPU_ID}] Prefetch thread INIT FAILED: {e}", flush=True)
+        return
     while True:
         try:
             if prefetch_q.qsize() >= PREFETCH_DEPTH:
@@ -135,11 +152,15 @@ def prefetcher():
                 continue
             row = get_claimed()
             if not row:
+                if prefetch_q.qsize() == 0:
+                    print(f"[GPU {GPU_ID}] No claims available", flush=True)
                 time.sleep(2)
                 continue
             vid, title = row
+            print(f"[GPU {GPU_ID}] Downloading {vid}", flush=True)
             result = download_and_load(vid, tmp_dir)
             if result is None:
+                print(f"[GPU {GPU_ID}] Download returned None for {vid}", flush=True)
                 mark_error(vid, "download_failed")
                 continue
             audio, sr, dur = result

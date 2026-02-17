@@ -6,9 +6,9 @@ Large-scale educational video transcription pipeline targeting **1M hours** of Y
 
 | Metric | Value |
 |--------|-------|
-| **Completed** | 12,000+ transcriptions (~10,500 audio hours) |
-| **Tokens** | ~116M estimated (targeting 10B+) |
-| **Queue** | 1.08M pending videos |
+| **Completed** | 15,500+ transcriptions (~9,000+ audio hours) |
+| **Tokens** | ~108M+ estimated (targeting 10B+) |
+| **Queue** | 1.86M+ pending videos |
 | **Throughput** | ~700 audio hours per wall-clock hour |
 | **GPUs** | 2× RTX 5090 + 2× RTX 4090 |
 
