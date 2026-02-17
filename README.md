@@ -6,11 +6,12 @@ Large-scale educational video transcription pipeline targeting **10M videos / 1M
 
 | Metric | Value |
 |--------|-------|
-| **Completed** | 15,500+ transcriptions (~13,800 audio hours) |
-| **Tokens** | ~152M estimated (targeting 10B+) |
-| **Queue** | 1.96M videos (1.83M pending) |
+| **Completed** | 20,124 transcriptions (~16,625 audio hours) |
+| **Tokens** | ~160M estimated (targeting 10B+) |
+| **Queue** | 2.29M videos |
 | **Discovery** | 1,150+ channels crawled |
-| **Speed** | 220-280x realtime per GPU |
+| **Speed** | 200-250x realtime per GPU |
+| **Throughput** | ~1,200 videos/hr combined |
 
 ## Architecture
 
@@ -32,18 +33,26 @@ Large-scale educational video transcription pipeline targeting **10M videos / 1M
   └─────────────┘            └────────────┘
 ```
 
+### Pipeline
+
+```
+yt-dlp (cookie pool, 5 accounts) → ffmpeg atempo 1.2x → faster-whisper CTranslate2
+```
+
 ### GPU Workers (`src/worker.py`)
 
-- **Engine**: faster-whisper (CTranslate2) with distil-large-v3.5
+- **Engine**: faster-whisper (CTranslate2) with distil-whisper/distil-large-v3.5
 - **Audio**: 1.2x speedup via yt-dlp atempo filter (17% less to transcribe)
 - **Settings**: beam_size=1, no VAD, condition_on_previous_text=False
-- **Download**: 2 prefetch threads/GPU, cookie rotation, retry with exponential backoff
+- **Download**: 2 prefetch threads/GPU, cookie rotation (5 accounts), retry with exponential backoff
 - **VRAM**: ~2.5GB per GPU
+- **Claiming**: Mixed duration (shortest first for throughput)
+- **Safety**: Process group kill for zombie prevention
 
 ### Discovery
 
-- `discover_channels_10M.py` — Extract channels from existing videos, crawl full catalogs, snowball via related channels. Main engine for scaling to 10M.
-- `discover_related.py` — Exponential discovery via related videos and playlist walking from completed videos.
+- `discover_channels_10M.py` — Extract channels from existing videos, crawl full catalogs, snowball via related channels
+- `discover_related.py` — Exponential discovery via related videos and playlist walking
 
 ### Cookie Rotation
 
@@ -51,15 +60,14 @@ YouTube requires authenticated cookies for bulk downloads. Place Netscape-format
 
 ```
 ~/academic_transcriptions/
-├── cookies_1.txt      # Account 1
-├── cookies_2.txt      # Account 2
-├── cookies_3.txt      # Account 3 (recommended: 3-4 for stability)
-└── ...
+├── cookies_1.txt
+├── cookies_2.txt
+├── cookies_3.txt
+├── cookies_4.txt
+└── cookies_5.txt
 ```
 
-Workers auto-discover `cookies*.txt` and rotate by GPU ID. Export cookies from a logged-in browser using extensions like "Get cookies.txt LOCALLY".
-
-**Recommended**: 3-4 accounts for sustainable throughput without rate limiting.
+Workers auto-discover `cookies*.txt` and rotate by GPU ID.
 
 ## Hardware
 
@@ -73,41 +81,35 @@ Workers auto-discover `cookies*.txt` and rotate by GPU ID. Export cookies from a
 ## Quick Start
 
 ```bash
-# Install deps
 pip install faster-whisper librosa numpy
-
-# Set up data directory
 mkdir -p ~/academic_transcriptions/tmp_gpu{0,1,2,3}
 # Place cookies*.txt and yt-dlp binary in ~/academic_transcriptions/
 
-# Launch workers
-bash launch.sh
-
-# Launch discovery
-bash launch_discovery.sh
-
-# Export to HuggingFace
-python3 src/export_hf.py
+bash launch.sh          # GPU workers
+bash launch_discovery.sh # Discovery crawlers
+python3 src/export_hf.py # Export to HuggingFace
 ```
 
 ## Dataset
 
 Published on HuggingFace: [`thepowerfuldeez/massive-yt-edu-transcriptions`](https://huggingface.co/datasets/thepowerfuldeez/massive-yt-edu-transcriptions)
 
-Daily auto-push at 6am London via cron.
-
 ## Files
 
 ```
 ├── README.md
-├── PROGRESS.md              # Detailed progress log
-├── launch.sh                # GPU worker launcher (sequential, waits for model load)
-├── launch_discovery.sh      # Discovery crawler launcher
+├── PROGRESS.md
+├── launch.sh
+├── launch_discovery.sh
 └── src/
-    ├── worker.py            # GPU transcription worker
-    ├── discover_channels_10M.py  # Channel-based discovery
-    ├── discover_related.py  # Related video discovery
-    ├── export_hf.py         # HuggingFace dataset export
-    ├── monitor.py           # System monitoring
-    └── quality_filter.py    # Video quality/education filter
+    ├── worker.py
+    ├── discover_channels_10M.py
+    ├── discover_related.py
+    ├── export_hf.py
+    ├── monitor.py
+    └── quality_filter.py
 ```
+
+## License
+
+MIT
