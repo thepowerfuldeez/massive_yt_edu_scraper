@@ -82,12 +82,22 @@ claimed_queue = queue.Queue()
 def refill_claims():
     conn = get_db()
     try:
+        # Mix short and long videos: claim half by priority, half shortest-first.
+        # This keeps GPUs busy with quick wins while big files download.
+        half = max(CLAIM_BATCH // 2, 1)
         cur = conn.execute(
             "UPDATE videos SET status='processing', processing_started_at=datetime('now') "
-            "WHERE video_id IN (SELECT video_id FROM videos WHERE status='pending' "
-            "AND (duration_seconds >= 900 OR duration_seconds IS NULL OR duration_seconds = 0) "
-            "ORDER BY priority DESC, id LIMIT ?) "
-            "RETURNING video_id, title", (CLAIM_BATCH,)
+            "WHERE video_id IN ("
+            "  SELECT video_id FROM ("
+            "    SELECT video_id FROM videos WHERE status='pending' "
+            "    AND (duration_seconds >= 900 OR duration_seconds IS NULL OR duration_seconds = 0) "
+            "    ORDER BY priority DESC, id LIMIT ?"
+            "    UNION "
+            "    SELECT video_id FROM videos WHERE status='pending' "
+            "    AND duration_seconds >= 900 AND duration_seconds IS NOT NULL "
+            "    ORDER BY duration_seconds ASC LIMIT ?"
+            "  )"
+            ") RETURNING video_id, title", (half, half)
         )
         rows = cur.fetchall()
         conn.commit()
@@ -158,7 +168,7 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      text=True, cwd=WORK_DIR, start_new_session=True)
             try:
-                proc.communicate(timeout=600)
+                proc.communicate(timeout=900)
             except subprocess.TimeoutExpired:
                 import signal
                 try:
