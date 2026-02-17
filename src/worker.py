@@ -82,22 +82,15 @@ claimed_queue = queue.Queue()
 def refill_claims():
     conn = get_db()
     try:
-        # Mix short and long videos: claim half by priority, half shortest-first.
-        # This keeps GPUs busy with quick wins while big files download.
-        half = max(CLAIM_BATCH // 2, 1)
+        # Claim shortest videos first — YouTube throttles ~1MB/s per stream,
+        # so 15-30min videos (10-20MB) download in seconds vs 4h+ (500MB+) taking 10min+.
+        # 599K short videos in queue = weeks of work before we need the big ones.
         cur = conn.execute(
             "UPDATE videos SET status='processing', processing_started_at=datetime('now') "
-            "WHERE video_id IN ("
-            "  SELECT video_id FROM ("
-            "    SELECT video_id FROM (SELECT video_id FROM videos WHERE status='pending' "
-            "    AND (duration_seconds >= 900 OR duration_seconds IS NULL OR duration_seconds = 0) "
-            "    ORDER BY priority DESC, id LIMIT ?)"
-            "    UNION "
-            "    SELECT video_id FROM (SELECT video_id FROM videos WHERE status='pending' "
-            "    AND duration_seconds >= 900 AND duration_seconds IS NOT NULL "
-            "    ORDER BY duration_seconds ASC LIMIT ?)"
-            "  )"
-            ") RETURNING video_id, title", (half, half)
+            "WHERE video_id IN (SELECT video_id FROM videos WHERE status='pending' "
+            "AND duration_seconds >= 900 "
+            "ORDER BY duration_seconds ASC, priority DESC LIMIT ?) "
+            "RETURNING video_id, title", (CLAIM_BATCH,)
         )
         rows = cur.fetchall()
         conn.commit()
