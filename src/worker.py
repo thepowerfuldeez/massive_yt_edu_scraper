@@ -132,12 +132,14 @@ def mark_error(video_id, error):
 
 # === Download ===
 def download_audio(video_id, tmp_dir, cookie_file=None):
-    """Download audio as opus (no conversion), return (file_path, duration) or None.
+    """Download audio as mp3 at 1.2x speed, return (file_path, duration) or None.
     
-    faster-whisper reads opus/webm natively via ffmpeg — no need for mp3 conversion.
-    This eliminates the massive ffmpeg bottleneck on multi-hour lectures.
+    Pipeline: yt-dlp downloads webm → ffmpeg converts to mp3 with atempo=1.2x.
+    The 1.2x speedup saves 17% GPU time. mp3 is smaller for temp storage.
+    Uses process group kill to prevent zombie ffmpeg on timeout.
     """
     out_template = os.path.join(tmp_dir, f"{video_id}.%(ext)s")
+    out_path = os.path.join(tmp_dir, f"{video_id}.mp3")
 
     for attempt in range(MAX_DOWNLOAD_RETRIES):
         try:
@@ -145,19 +147,19 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
             if cookie_file:
                 cmd += ["--cookies", cookie_file]
             cmd += [
-                "-x",  # extract audio only, keep native format (opus)
+                "-x", "--audio-format", "mp3", "--audio-quality", "5",
+                "--postprocessor-args", f"ffmpeg:-filter:a atempo={AUDIO_SPEED}",
                 "-o", out_template, "--no-playlist",
                 "--socket-timeout", "30", "--retries", "3",
                 "--no-warnings", "--no-check-certificates",
                 f"https://www.youtube.com/watch?v={video_id}",
             ]
-            # Use Popen + manual timeout to kill entire process group on timeout
+            # Popen with process group so timeout kills yt-dlp + ffmpeg children
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      text=True, cwd=WORK_DIR, start_new_session=True)
             try:
-                proc.communicate(timeout=180)
+                proc.communicate(timeout=600)
             except subprocess.TimeoutExpired:
-                # Kill entire process group (yt-dlp + ffmpeg children)
                 import signal
                 try:
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
@@ -166,10 +168,12 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
                 proc.wait()
                 raise
 
-            # Find the downloaded file (could be .opus, .webm, .m4a, .ogg)
-            matches = [f for f in glob.glob(os.path.join(tmp_dir, f"{video_id}.*"))
-                       if not f.endswith(".part")]
-            if not matches:
+            if not os.path.exists(out_path):
+                matches = [f for f in glob.glob(os.path.join(tmp_dir, f"{video_id}.*"))
+                           if not f.endswith(".part")]
+                out_path = matches[0] if matches else None
+
+            if not out_path or not os.path.exists(out_path):
                 if attempt < MAX_DOWNLOAD_RETRIES - 1:
                     wait = (2 ** attempt) * 5 + random.random() * 5
                     print(f"[GPU {GPU_ID}] Download failed {video_id}, "
@@ -178,16 +182,23 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
                     continue
                 return None
 
-            out_path = matches[0]
-            # Get duration via ffprobe (fast, no conversion)
+            # Get duration via ffprobe (fast)
             try:
                 probe = subprocess.run(
                     ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
                      "-of", "default=noprint_wrappers=1:nokey=1", out_path],
                     capture_output=True, text=True, timeout=10)
-                duration = float(probe.stdout.strip())
+                duration = float(probe.stdout.strip()) * AUDIO_SPEED  # original duration
             except Exception:
                 duration = 0
+
+            # Clean up webm/intermediate files, keep only mp3
+            for f in glob.glob(os.path.join(tmp_dir, f"{video_id}.*")):
+                if f != out_path:
+                    try:
+                        os.unlink(f)
+                    except OSError:
+                        pass
 
             return out_path, duration
 
