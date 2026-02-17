@@ -167,10 +167,12 @@ def download_and_load(video_id, tmp_dir, cookie_file=None):
 
             audio, sr = librosa.load(out_path, sr=16000, mono=True)
             original_duration = (len(audio) / sr) * AUDIO_SPEED
-            try:
-                os.unlink(out_path)
-            except OSError:
-                pass
+            # Clean up ALL files for this video (mp3, webm, etc.)
+            for f in glob.glob(os.path.join(tmp_dir, f"{video_id}.*")):
+                try:
+                    os.unlink(f)
+                except OSError:
+                    pass
             return audio, sr, original_duration
 
         except Exception as e:
