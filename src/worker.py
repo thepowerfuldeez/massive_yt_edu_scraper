@@ -25,15 +25,19 @@ CLAIM_BATCH = 15
 AUDIO_SPEED = 1.2
 MAX_DOWNLOAD_RETRIES = 3
 
-# Cookie rotation: load all cookies_*.txt files from WORK_DIR
-COOKIE_FILES = sorted(glob.glob(os.path.join(WORK_DIR, "cookies*.txt")))
-if not COOKIE_FILES:
-    print(f"[GPU {GPU_ID}] WARNING: No cookie files found in {WORK_DIR}", flush=True)
-    COOKIE_FILE = None
+# Per-GPU cookie file to avoid concurrent write corruption by yt-dlp.
+# yt-dlp rewrites cookie files on each run — sharing one file across threads causes corruption.
+# Place a master cookie file as cookies_master.txt, then copy per-GPU:
+#   for i in 0 1 2 3; do cp cookies_master.txt cookies_gpu.txt; done
+COOKIE_FILE = os.path.join(WORK_DIR, f"cookies_gpu{GPU_ID}.txt")
+if not os.path.exists(COOKIE_FILE):
+    # Fallback: try any cookies file
+    candidates = sorted(glob.glob(os.path.join(WORK_DIR, "cookies*.txt")))
+    COOKIE_FILE = candidates[0] if candidates else None
+if COOKIE_FILE:
+    print(f"[GPU {GPU_ID}] Using cookies: {os.path.basename(COOKIE_FILE)}", flush=True)
 else:
-    COOKIE_FILE = COOKIE_FILES[GPU_ID % len(COOKIE_FILES)]
-    print(f"[GPU {GPU_ID}] Using cookies: {os.path.basename(COOKIE_FILE)} "
-          f"({len(COOKIE_FILES)} available)", flush=True)
+    print(f"[GPU {GPU_ID}] WARNING: No cookie files found in {WORK_DIR}", flush=True)
 
 
 def get_db():
@@ -51,8 +55,8 @@ def refill_claims():
     conn = get_db()
     try:
         cur = conn.execute(
-            "UPDATE videos SET status=processing, processing_started_at=datetime(now) "
-            "WHERE video_id IN (SELECT video_id FROM videos WHERE status=pending "
+            "UPDATE videos SET status='processing', processing_started_at=datetime('now') "
+            "WHERE video_id IN (SELECT video_id FROM videos WHERE status='pending' "
             "AND (duration_seconds >= 900 OR duration_seconds IS NULL OR duration_seconds = 0) "
             "ORDER BY priority DESC, id LIMIT ?) "
             "RETURNING video_id, title", (CLAIM_BATCH,)
@@ -82,8 +86,8 @@ def mark_done(video_id, transcript, duration_s, transcribe_s):
     conn = get_db()
     speed = duration_s / transcribe_s if transcribe_s > 0 else 0
     conn.execute(
-        "UPDATE videos SET status=completed, transcript=?, duration_seconds=?, "
-        "processing_time_seconds=?, speed_ratio=?, completed_at=datetime(now) WHERE video_id=?",
+        "UPDATE videos SET status='completed', transcript=?, duration_seconds=?, "
+        "processing_time_seconds=?, speed_ratio=?, completed_at=datetime('now') WHERE video_id=?",
         (transcript, duration_s, transcribe_s, speed, video_id))
     conn.commit()
     conn.close()
@@ -92,7 +96,7 @@ def mark_done(video_id, transcript, duration_s, transcribe_s):
 def mark_error(video_id, error):
     conn = get_db()
     conn.execute(
-        "UPDATE videos SET status=error, error=? WHERE video_id=?",
+        "UPDATE videos SET status='error', error=? WHERE video_id=?",
         (str(error)[:500], video_id))
     conn.commit()
     conn.close()
