@@ -89,13 +89,13 @@ def refill_claims():
             "UPDATE videos SET status='processing', processing_started_at=datetime('now') "
             "WHERE video_id IN ("
             "  SELECT video_id FROM ("
-            "    SELECT video_id FROM videos WHERE status='pending' "
+            "    SELECT video_id FROM (SELECT video_id FROM videos WHERE status='pending' "
             "    AND (duration_seconds >= 900 OR duration_seconds IS NULL OR duration_seconds = 0) "
-            "    ORDER BY priority DESC, id LIMIT ?"
+            "    ORDER BY priority DESC, id LIMIT ?)"
             "    UNION "
-            "    SELECT video_id FROM videos WHERE status='pending' "
+            "    SELECT video_id FROM (SELECT video_id FROM videos WHERE status='pending' "
             "    AND duration_seconds >= 900 AND duration_seconds IS NOT NULL "
-            "    ORDER BY duration_seconds ASC LIMIT ?"
+            "    ORDER BY duration_seconds ASC LIMIT ?)"
             "  )"
             ") RETURNING video_id, title", (half, half)
         )
