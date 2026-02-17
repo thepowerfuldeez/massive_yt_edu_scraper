@@ -25,36 +25,47 @@ CLAIM_BATCH = 15
 AUDIO_SPEED = 1.2
 MAX_DOWNLOAD_RETRIES = 3
 
-# Per-thread cookie files to avoid concurrent write corruption by yt-dlp.
-# yt-dlp rewrites cookie files on each run — sharing across threads causes corruption.
-# We copy from a master file to per-thread copies on startup.
-COOKIE_MASTER = None
-for candidate in [
-    os.path.join(WORK_DIR, "cookies_burner.txt"),
-    os.path.join(WORK_DIR, "cookies_master.txt"),
-    os.path.join(WORK_DIR, "cookies.txt"),
-]:
-    if os.path.exists(candidate):
-        COOKIE_MASTER = candidate
-        break
-if not COOKIE_MASTER:
-    candidates = sorted(glob.glob(os.path.join(WORK_DIR, "cookies*.txt")))
-    COOKIE_MASTER = candidates[0] if candidates else None
+# Cookie strategy: prefer per-GPU anon cookie files, fall back to burner/master.
+# Anonymous cookies are generated via curl and don't require a login.
+# Each GPU gets its own cookie file to avoid yt-dlp rewrite corruption.
+import shutil, subprocess as _sp
 
-import shutil
+def _gen_anon_cookie(path, gpu_id):
+    """Generate a fresh anonymous YouTube cookie file via curl."""
+    try:
+        _sp.run([
+            "curl", "-sS", "-c", path,
+            "-H", f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.{gpu_id}.0 Safari/537.36",
+            "-H", "Accept-Language: en-US,en;q=0.9",
+            "https://www.youtube.com/",
+        ], capture_output=True, timeout=15)
+        return os.path.exists(path)
+    except Exception:
+        return False
 
 def get_thread_cookie_file(thread_idx):
-    """Return a per-thread cookie file path, copied fresh from master."""
-    if not COOKIE_MASTER:
-        return None
+    """Return a per-thread cookie file, generating fresh anon cookies if needed."""
     path = os.path.join(WORK_DIR, f"cookies_gpu{GPU_ID}_t{thread_idx}.txt")
-    shutil.copy2(COOKIE_MASTER, path)
-    return path
+    # Try existing burner/master first
+    for candidate in [
+        os.path.join(WORK_DIR, "cookies_burner.txt"),
+        os.path.join(WORK_DIR, "cookies_master.txt"),
+    ]:
+        if os.path.exists(candidate):
+            shutil.copy2(candidate, path)
+            return path
+    # Fall back to generating anonymous cookies
+    if _gen_anon_cookie(path, GPU_ID * 10 + thread_idx):
+        return path
+    return None
 
-if COOKIE_MASTER:
-    print(f"[GPU {GPU_ID}] Cookie master: {os.path.basename(COOKIE_MASTER)}", flush=True)
-else:
-    print(f"[GPU {GPU_ID}] WARNING: No cookie files found in {WORK_DIR}", flush=True)
+_cookie_file = get_thread_cookie_file(0)
+_cookie_name = os.path.basename(_cookie_file) if _cookie_file else "NONE"
+print(f"[GPU {GPU_ID}] Cookie file: {_cookie_name}", flush=True)
+
+# Track consecutive failures to trigger cookie refresh
+_download_fails = 0
+_FAIL_REFRESH_THRESHOLD = 5  # refresh cookies after this many consecutive failures
 
 
 def get_db():
@@ -186,6 +197,7 @@ os.makedirs(tmp_dir, exist_ok=True)
 
 def prefetcher(thread_idx):
     cookie_file = get_thread_cookie_file(thread_idx)
+    consec_fails = 0
     try:
         import librosa  # noqa: F811
     except Exception as e:
@@ -208,8 +220,15 @@ def prefetcher(thread_idx):
             result = download_and_load(vid, tmp_dir, cookie_file=cookie_file)
             if result is None:
                 mark_error(vid, "download_failed")
+                consec_fails += 1
+                if consec_fails >= _FAIL_REFRESH_THRESHOLD:
+                    print(f"[GPU {GPU_ID}] {consec_fails} consecutive download failures, refreshing cookies...", flush=True)
+                    _gen_anon_cookie(cookie_file, GPU_ID * 10 + thread_idx + random.randint(100, 999))
+                    consec_fails = 0
+                    time.sleep(10)
                 continue
 
+            consec_fails = 0  # reset on success
             audio, sr, dur = result
             if dur < 5:
                 mark_error(vid, f"too_short_{dur:.0f}s")
