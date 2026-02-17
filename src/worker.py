@@ -20,52 +20,52 @@ WORK_DIR = os.path.expanduser("~/academic_transcriptions")
 YTDLP = os.path.join(WORK_DIR, "yt-dlp")
 MODEL_ID = "distil-large-v3.5"
 PREFETCH_DEPTH = 5
-PREFETCH_THREADS = 1
+PREFETCH_THREADS = 2
 CLAIM_BATCH = 15
 AUDIO_SPEED = 1.2
 MAX_DOWNLOAD_RETRIES = 3
 
-# Cookie strategy: prefer per-GPU anon cookie files, fall back to burner/master.
-# Anonymous cookies are generated via curl and don't require a login.
-# Each GPU gets its own cookie file to avoid yt-dlp rewrite corruption.
-import shutil, subprocess as _sp
+# Cookie rotation: pool of real account cookies in cookie_pool/ directory.
+# Each download thread picks a cookie round-robin from the pool.
+# On consecutive failures, rotate to next cookie and back off.
+import shutil
 
-def _gen_anon_cookie(path, gpu_id):
-    """Generate a fresh anonymous YouTube cookie file via curl."""
-    try:
-        _sp.run([
-            "curl", "-sS", "-c", path,
-            "-H", f"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.{gpu_id}.0 Safari/537.36",
-            "-H", "Accept-Language: en-US,en;q=0.9",
-            "https://www.youtube.com/",
-        ], capture_output=True, timeout=15)
-        return os.path.exists(path)
-    except Exception:
-        return False
+COOKIE_POOL_DIR = os.path.join(WORK_DIR, "cookie_pool")
+
+def load_cookie_pool():
+    """Load all cookie files from cookie_pool/ directory."""
+    if not os.path.isdir(COOKIE_POOL_DIR):
+        print(f"[GPU {GPU_ID}] WARNING: No cookie_pool/ directory found!", flush=True)
+        return []
+    files = sorted(glob.glob(os.path.join(COOKIE_POOL_DIR, "*.txt")))
+    print(f"[GPU {GPU_ID}] Cookie pool: {len(files)} cookies loaded", flush=True)
+    for f in files:
+        print(f"  - {os.path.basename(f)}", flush=True)
+    return files
+
+_cookie_pool = load_cookie_pool()
+_cookie_lock = threading.Lock()
+_cookie_counter = GPU_ID  # offset so each GPU starts on a different cookie
 
 def get_thread_cookie_file(thread_idx):
-    """Return a per-thread cookie file, generating fresh anon cookies if needed."""
-    path = os.path.join(WORK_DIR, f"cookies_gpu{GPU_ID}_t{thread_idx}.txt")
-    # Try existing burner/master first
-    for candidate in [
-        os.path.join(WORK_DIR, "cookies_burner.txt"),
-        os.path.join(WORK_DIR, "cookies_master.txt"),
-    ]:
-        if os.path.exists(candidate):
-            shutil.copy2(candidate, path)
-            return path
-    # Fall back to generating anonymous cookies
-    if _gen_anon_cookie(path, GPU_ID * 10 + thread_idx):
-        return path
-    return None
+    """Return a per-thread cookie file copied from the pool (round-robin)."""
+    global _cookie_counter
+    if not _cookie_pool:
+        return None
+    with _cookie_lock:
+        idx = _cookie_counter % len(_cookie_pool)
+        _cookie_counter += 1
+    src = _cookie_pool[idx]
+    dst = os.path.join(WORK_DIR, f"cookies_gpu{GPU_ID}_t{thread_idx}.txt")
+    shutil.copy2(src, dst)
+    print(f"[GPU {GPU_ID}] Thread {thread_idx} using cookie: {os.path.basename(src)}", flush=True)
+    return dst
 
-_cookie_file = get_thread_cookie_file(0)
-_cookie_name = os.path.basename(_cookie_file) if _cookie_file else "NONE"
-print(f"[GPU {GPU_ID}] Cookie file: {_cookie_name}", flush=True)
+def rotate_cookie(thread_idx):
+    """Force-rotate to the next cookie in the pool."""
+    return get_thread_cookie_file(thread_idx)
 
-# Track consecutive failures to trigger cookie refresh
-_download_fails = 0
-_FAIL_REFRESH_THRESHOLD = 5  # refresh cookies after this many consecutive failures
+_FAIL_REFRESH_THRESHOLD = 5  # rotate cookies after this many consecutive failures
 
 
 def get_db():
@@ -131,11 +131,13 @@ def mark_error(video_id, error):
 
 
 # === Download ===
-def download_and_load(video_id, tmp_dir, cookie_file=None):
-    """Download audio at 1.2x speed, return (audio_array, sr, original_duration) or None."""
-    import librosa
+def download_audio(video_id, tmp_dir, cookie_file=None):
+    """Download audio as opus (no conversion), return (file_path, duration) or None.
+    
+    faster-whisper reads opus/webm natively via ffmpeg — no need for mp3 conversion.
+    This eliminates the massive ffmpeg bottleneck on multi-hour lectures.
+    """
     out_template = os.path.join(tmp_dir, f"{video_id}.%(ext)s")
-    out_path = os.path.join(tmp_dir, f"{video_id}.mp3")
 
     for attempt in range(MAX_DOWNLOAD_RETRIES):
         try:
@@ -143,20 +145,18 @@ def download_and_load(video_id, tmp_dir, cookie_file=None):
             if cookie_file:
                 cmd += ["--cookies", cookie_file]
             cmd += [
-                "-x", "--audio-format", "mp3", "--audio-quality", "5",
-                "--postprocessor-args", f"ffmpeg:-filter:a atempo={AUDIO_SPEED}",
+                "-x",  # extract audio only, keep native format (opus)
                 "-o", out_template, "--no-playlist",
-                "--socket-timeout", "30", "--retries", "5",
+                "--socket-timeout", "30", "--retries", "3",
                 "--no-warnings", "--no-check-certificates",
                 f"https://www.youtube.com/watch?v={video_id}",
             ]
-            subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=WORK_DIR)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=180, cwd=WORK_DIR)
 
-            if not os.path.exists(out_path):
-                matches = glob.glob(os.path.join(tmp_dir, f"{video_id}.*"))
-                out_path = matches[0] if matches else None
-
-            if not out_path or not os.path.exists(out_path):
+            # Find the downloaded file (could be .opus, .webm, .m4a, .ogg)
+            matches = [f for f in glob.glob(os.path.join(tmp_dir, f"{video_id}.*"))
+                       if not f.endswith(".part")]
+            if not matches:
                 if attempt < MAX_DOWNLOAD_RETRIES - 1:
                     wait = (2 ** attempt) * 5 + random.random() * 5
                     print(f"[GPU {GPU_ID}] Download failed {video_id}, "
@@ -165,15 +165,18 @@ def download_and_load(video_id, tmp_dir, cookie_file=None):
                     continue
                 return None
 
-            audio, sr = librosa.load(out_path, sr=16000, mono=True)
-            original_duration = (len(audio) / sr) * AUDIO_SPEED
-            # Clean up ALL files for this video (mp3, webm, etc.)
-            for f in glob.glob(os.path.join(tmp_dir, f"{video_id}.*")):
-                try:
-                    os.unlink(f)
-                except OSError:
-                    pass
-            return audio, sr, original_duration
+            out_path = matches[0]
+            # Get duration via ffprobe (fast, no conversion)
+            try:
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                     "-of", "default=noprint_wrappers=1:nokey=1", out_path],
+                    capture_output=True, text=True, timeout=10)
+                duration = float(probe.stdout.strip())
+            except Exception:
+                duration = 0
+
+            return out_path, duration
 
         except Exception as e:
             for f in glob.glob(os.path.join(tmp_dir, f"{video_id}.*")):
@@ -200,12 +203,6 @@ os.makedirs(tmp_dir, exist_ok=True)
 def prefetcher(thread_idx):
     cookie_file = get_thread_cookie_file(thread_idx)
     consec_fails = 0
-    try:
-        import librosa  # noqa: F811
-    except Exception as e:
-        print(f"[GPU {GPU_ID}] Prefetch init failed: {e}", flush=True)
-        return
-
     print(f"[GPU {GPU_ID}] Prefetch thread {thread_idx} started", flush=True)
     while True:
         try:
@@ -219,24 +216,28 @@ def prefetcher(thread_idx):
                 continue
 
             vid, title = row
-            result = download_and_load(vid, tmp_dir, cookie_file=cookie_file)
+            result = download_audio(vid, tmp_dir, cookie_file=cookie_file)
             if result is None:
                 mark_error(vid, "download_failed")
                 consec_fails += 1
                 if consec_fails >= _FAIL_REFRESH_THRESHOLD:
-                    print(f"[GPU {GPU_ID}] {consec_fails} consecutive download failures, refreshing cookies...", flush=True)
-                    _gen_anon_cookie(cookie_file, GPU_ID * 10 + thread_idx + random.randint(100, 999))
+                    print(f"[GPU {GPU_ID}] {consec_fails} consecutive download failures, rotating cookies...", flush=True)
+                    cookie_file = rotate_cookie(thread_idx)
                     consec_fails = 0
                     time.sleep(10)
                 continue
 
             consec_fails = 0  # reset on success
-            audio, sr, dur = result
+            audio_path, dur = result
             if dur < 5:
                 mark_error(vid, f"too_short_{dur:.0f}s")
+                try:
+                    os.unlink(audio_path)
+                except OSError:
+                    pass
                 continue
 
-            prefetch_q.put((vid, title, audio, dur))
+            prefetch_q.put((vid, title, audio_path, dur))
             time.sleep(random.uniform(1, 3))  # rate-limit protection
         except Exception as e:
             print(f"[GPU {GPU_ID}] Prefetch error: {e}", flush=True)
@@ -266,18 +267,25 @@ start_time = time.time()
 
 while True:
     try:
-        vid, title, audio, dur = prefetch_q.get(timeout=60)
+        vid, title, audio_path, dur = prefetch_q.get(timeout=60)
     except queue.Empty:
         print(f"[GPU {GPU_ID}] Prefetch queue empty 60s, waiting...", flush=True)
         continue
 
     try:
         t0 = time.time()
+        # faster-whisper reads opus/webm/m4a directly via internal ffmpeg
         segments, info = model.transcribe(
-            audio, beam_size=1, vad_filter=False,
+            audio_path, beam_size=1, vad_filter=False,
             word_timestamps=False, condition_on_previous_text=False)
         transcript = " ".join(s.text for s in segments).strip()
         transcribe_s = time.time() - t0
+
+        # Clean up audio file after transcription
+        try:
+            os.unlink(audio_path)
+        except OSError:
+            pass
 
         if transcript:
             mark_done(vid, transcript, dur, transcribe_s)
@@ -298,3 +306,7 @@ while True:
     except Exception as e:
         print(f"[GPU {GPU_ID}] ERROR: {traceback.format_exc()}", flush=True)
         mark_error(vid, str(e))
+        try:
+            os.unlink(audio_path)
+        except (OSError, NameError):
+            pass
