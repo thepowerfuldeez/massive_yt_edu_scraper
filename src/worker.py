@@ -92,9 +92,9 @@ def refill_claims():
         #   - 10% default priority long (60min+, P5+P7)
         # Within each bucket: random sampling via ORDER BY RANDOM()
         buckets = [
-            ("priority >= 8 AND duration_seconds < 3600", 0.40),
-            ("priority >= 8 AND duration_seconds >= 3600", 0.25),
-            ("priority < 8 AND duration_seconds < 3600", 0.25),
+            ("priority >= 8 AND duration_seconds < 3600", 0.50),
+            ("priority >= 8 AND duration_seconds >= 3600", 0.10),
+            ("priority < 8 AND duration_seconds < 3600", 0.30),
             ("priority < 8 AND duration_seconds >= 3600", 0.10),
         ]
         all_ids = []
