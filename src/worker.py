@@ -82,15 +82,48 @@ claimed_queue = queue.Queue()
 def refill_claims():
     conn = get_db()
     try:
-        # Claim shortest videos first — YouTube throttles ~1MB/s per stream,
-        # so 15-30min videos (10-20MB) download in seconds vs 4h+ (500MB+) taking 10min+.
-        # 599K short videos in queue = weeks of work before we need the big ones.
+        # Weighted random sampling across priorities and durations.
+        # Bias toward higher priority and shorter videos (faster downloads),
+        # but still sample variety for dataset diversity.
+        # Strategy: pick from 4 buckets proportionally:
+        #   - 40% high priority short (<60min, P8+P9)
+        #   - 25% high priority long (60min+, P8+P9)
+        #   - 25% default priority short (<60min, P5+P7)
+        #   - 10% default priority long (60min+, P5+P7)
+        # Within each bucket: random sampling via ORDER BY RANDOM()
+        buckets = [
+            ("priority >= 8 AND duration_seconds < 3600", 0.40),
+            ("priority >= 8 AND duration_seconds >= 3600", 0.25),
+            ("priority < 8 AND duration_seconds < 3600", 0.25),
+            ("priority < 8 AND duration_seconds >= 3600", 0.10),
+        ]
+        all_ids = []
+        for cond, frac in buckets:
+            n = max(int(CLAIM_BATCH * frac), 1)
+            rows = conn.execute(
+                f"SELECT video_id FROM videos WHERE status='pending' "
+                f"AND (duration_seconds >= 900 OR duration_seconds IS NULL OR duration_seconds = 0) "
+                f"AND ({cond}) ORDER BY RANDOM() LIMIT ?", (n,)
+            ).fetchall()
+            all_ids.extend(r[0] for r in rows)
+
+        if not all_ids:
+            # Fallback: grab anything pending
+            rows = conn.execute(
+                "SELECT video_id FROM videos WHERE status='pending' "
+                "AND (duration_seconds >= 900 OR duration_seconds IS NULL OR duration_seconds = 0) "
+                "ORDER BY RANDOM() LIMIT ?", (CLAIM_BATCH,)
+            ).fetchall()
+            all_ids = [r[0] for r in rows]
+
+        if not all_ids:
+            return []
+
+        placeholders = ",".join("?" * len(all_ids))
         cur = conn.execute(
-            "UPDATE videos SET status='processing', processing_started_at=datetime('now') "
-            "WHERE video_id IN (SELECT video_id FROM videos WHERE status='pending' "
-            "AND duration_seconds >= 900 "
-            "ORDER BY duration_seconds ASC, priority DESC LIMIT ?) "
-            "RETURNING video_id, title", (CLAIM_BATCH,)
+            f"UPDATE videos SET status='processing', processing_started_at=datetime('now') "
+            f"WHERE video_id IN ({placeholders}) "
+            f"RETURNING video_id, title", all_ids
         )
         rows = cur.fetchall()
         conn.commit()
