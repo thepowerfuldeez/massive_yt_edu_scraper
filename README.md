@@ -6,12 +6,12 @@ Large-scale educational video transcription pipeline targeting **10M videos / 1M
 
 | Metric | Value |
 |--------|-------|
-| **Completed** | 20,124 transcriptions (~16,625 audio hours) |
-| **Tokens** | ~160M estimated (targeting 10B+) |
-| **Queue** | 2.29M videos |
-| **Discovery** | 1,150+ channels crawled |
-| **Speed** | 200-250x realtime per GPU |
-| **Throughput** | ~1,200 videos/hr combined |
+| **Completed** | 54,349 transcriptions (~32,202 audio hours) |
+| **Tokens** | ~346M estimated (targeting 10B+) |
+| **Queue** | 4.06M videos |
+| **Discovery** | 3,000+ channels crawled |
+| **Speed** | 165-185x realtime per GPU |
+| **Throughput** | ~550 videos/hr combined |
 
 ## Architecture
 
@@ -46,8 +46,8 @@ yt-dlp (cookie pool, 5 accounts) → ffmpeg atempo 1.2x → faster-whisper CTran
 - **Settings**: beam_size=1, no VAD, condition_on_previous_text=False
 - **Download**: 2 prefetch threads/GPU, cookie rotation (5 accounts), retry with exponential backoff
 - **VRAM**: ~2.5GB per GPU
-- **Claiming**: Mixed duration (shortest first for throughput)
-- **Safety**: Process group kill for zombie prevention
+- **Claiming**: Weighted random sampling — 80% short (<1h), 20% long; priority-aware buckets
+- **Safety**: Process group kill for zombie prevention, 900s subprocess timeout
 
 ### Discovery
 
@@ -73,10 +73,10 @@ Workers auto-discover `cookies*.txt` and rotate by GPU ID.
 
 | GPU | Model | VRAM | Avg Speed |
 |-----|-------|------|-----------|
-| 0 | RTX 5090 | 32GB | ~250x |
-| 1 | RTX 4090 | 24GB | ~240x |
-| 2 | RTX 5090 | 32GB | ~260x |
-| 3 | RTX 4090 | 24GB | ~235x |
+| 0 | RTX 5090 | 32GB | ~169x |
+| 1 | RTX 5090 | 32GB | ~171x |
+| 2 | RTX 4090 | 24GB | ~181x |
+| 3 | RTX 4090 | 24GB | ~183x |
 
 ## Quick Start
 
@@ -99,16 +99,23 @@ Published on HuggingFace: [`thepowerfuldeez/massive-yt-edu-transcriptions`](http
 ```
 ├── README.md
 ├── PROGRESS.md
+├── POSTPROCESSING_RESEARCH.md
 ├── launch.sh
 ├── launch_discovery.sh
+├── watchdog.sh
 └── src/
     ├── worker.py
+    ├── postprocess.py
     ├── discover_channels_10M.py
     ├── discover_related.py
     ├── export_hf.py
     ├── monitor.py
     └── quality_filter.py
 ```
+
+## Post-Processing Research
+
+Investigated ITN, punctuation restoration, and truecasing. **Conclusion: Whisper large-v3 output is already production-quality** — proper punctuation, capitalization, and readability out of the box. See [POSTPROCESSING_RESEARCH.md](POSTPROCESSING_RESEARCH.md) for full benchmarks.
 
 ## License
 
