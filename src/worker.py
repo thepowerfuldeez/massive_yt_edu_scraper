@@ -91,11 +91,14 @@ def refill_claims():
         #   - 25% default priority short (<60min, P5+P7)
         #   - 10% default priority long (60min+, P5+P7)
         # Within each bucket: random sampling via ORDER BY RANDOM()
+        # Priority: GREEN (CC-licensed) > high priority > default
+        # RED content is excluded entirely
         buckets = [
-            ("priority >= 8 AND duration_seconds < 3600", 0.50),
-            ("priority >= 8 AND duration_seconds >= 3600", 0.10),
-            ("priority < 8 AND duration_seconds < 3600", 0.30),
-            ("priority < 8 AND duration_seconds >= 3600", 0.10),
+            ("license_risk = 'green'", 0.40),                              # CC-licensed first
+            ("license_risk != 'red' AND priority >= 8 AND duration_seconds < 3600", 0.25),
+            ("license_risk != 'red' AND priority >= 8 AND duration_seconds >= 3600", 0.05),
+            ("license_risk != 'red' AND priority < 8 AND duration_seconds < 3600", 0.20),
+            ("license_risk != 'red' AND priority < 8 AND duration_seconds >= 3600", 0.10),
         ]
         all_ids = []
         for cond, frac in buckets:
@@ -108,10 +111,11 @@ def refill_claims():
             all_ids.extend(r[0] for r in rows)
 
         if not all_ids:
-            # Fallback: grab anything pending
+            # Fallback: grab anything pending (excluding RED)
             rows = conn.execute(
                 "SELECT video_id FROM videos WHERE status='pending' "
                 "AND (duration_seconds >= 900 OR duration_seconds IS NULL OR duration_seconds = 0) "
+                "AND (license_risk IS NULL OR license_risk != 'red') "
                 "ORDER BY RANDOM() LIMIT ?", (CLAIM_BATCH,)
             ).fetchall()
             all_ids = [r[0] for r in rows]

@@ -1,121 +1,146 @@
 # Massive YouTube Educational Transcription
 
-Large-scale educational video transcription pipeline targeting **10M videos / 1M hours** of YouTube content.
+Autonomous pipeline for transcribing YouTube educational content at scale. Uses faster-whisper on multi-GPU to produce a large open educational text dataset.
 
-## Stats
+## Current Stats
 
 | Metric | Value |
 |--------|-------|
-| **Completed** | 54,349 transcriptions (~32,202 audio hours) |
-| **Tokens** | ~346M estimated (targeting 10B+) |
-| **Queue** | 4.06M videos |
-| **Discovery** | 3,000+ channels crawled |
-| **Speed** | 165-185x realtime per GPU |
-| **Throughput** | ~550 videos/hr combined |
+| **Transcribed** | 59,344 videos (~35,876 audio hours) |
+| **Characters** | 1.54B (~384M tokens) |
+| **Queue** | 4.32M pending (4.54M total discovered) |
+| **Speed** | 165–185× realtime per GPU |
+| **Throughput** | ~550 videos/hr (4 GPUs) |
+
+## Datasets
+
+| Dataset | Description |
+|---------|-------------|
+| [massive-yt-edu-transcriptions](https://huggingface.co/datasets/thepowerfuldeez/massive-yt-edu-transcriptions) | Full transcripts (daily auto-push) |
+| [massive-yt-edu-queue](https://huggingface.co/datasets/thepowerfuldeez/massive-yt-edu-queue) | 4.5M video metadata with content classification + license risk |
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│                   SQLite DB (WAL)                │
-│  videos table: pending → processing → completed  │
-│  Atomic UPDATE...RETURNING for claim/dedup       │
-└───────┬──────────────────────────┬──────────────┘
-        │                          │
-  ┌─────▼──────┐            ┌─────▼──────┐
-  │ GPU Workers │            │ Discovery  │
-  │ (4x GPUs)  │            │ Crawlers   │
-  │             │            │            │
-  │ 2 prefetch  │            │ Channel    │
-  │ threads ea  │            │ crawler    │
-  │ cookie rot  │            │ Related    │
-  │ 1.2x speed  │            │ video      │
-  └─────────────┘            └────────────┘
+SQLite DB (WAL mode) ← single source of truth
+├── GPU Workers (4×)
+│   ├── 2 prefetch threads each (yt-dlp + ffmpeg 1.2× atempo → mp3)
+│   ├── Cookie pool rotation (5 accounts, per-thread copies)
+│   └── faster-whisper CTranslate2 (distil-large-v3.5, beam=1, no VAD)
+├── Discovery Crawlers
+│   ├── Channel crawler (full catalog extraction, snowball via related)
+│   ├── Related video walker (playlist + recommendation chains)
+│   └── CC-focused discovery (known OCW channels + CC search filters)
+├── License Scanner
+│   ├── yt-dlp description + license field fetcher
+│   └── YouTube Data API v3 batch scanner (50 IDs/request)
+└── HuggingFace Export (daily cron)
 ```
 
-### Pipeline
+### Key Design Decisions
 
-```
-yt-dlp (cookie pool, 5 accounts) → ffmpeg atempo 1.2x → faster-whisper CTranslate2
-```
+- **faster-whisper over HF pipeline**: 3.3× faster, 2.5GB VRAM vs 6–8GB (CTranslate2 fused kernels)
+- **1.2× audio speedup**: yt-dlp atempo filter — 17% less GPU work, negligible quality loss
+- **No VAD**: Silero VAD benchmarked — adds overhead on dense educational lectures
+- **beam_size=1**: Max throughput for batch workload
+- **SQLite as queue**: Atomic `UPDATE...RETURNING` claims, WAL mode, no external queue service
+- **Cookie pool**: YouTube blocks unauthenticated bulk downloads; 5 accounts rotate per-thread
+- **Process group kill**: `start_new_session=True` + `os.killpg()` prevents zombie yt-dlp/ffmpeg
+- **Post-processing skipped**: Whisper large-v3 already produces properly punctuated, capitalized text
 
-### GPU Workers (`src/worker.py`)
+## Content Classification
 
-- **Engine**: faster-whisper (CTranslate2) with distil-whisper/distil-large-v3.5
-- **Audio**: 1.2x speedup via yt-dlp atempo filter (17% less to transcribe)
-- **Settings**: beam_size=1, no VAD, condition_on_previous_text=False
-- **Download**: 2 prefetch threads/GPU, cookie rotation (5 accounts), retry with exponential backoff
-- **VRAM**: ~2.5GB per GPU
-- **Claiming**: Weighted random sampling — 80% short (<1h), 20% long; priority-aware buckets
-- **Safety**: Process group kill for zombie prevention, 900s subprocess timeout
+Every video is classified by content source and license risk:
 
-### Discovery
+| Risk | Count | Description |
+|------|-------|-------------|
+| 🟢 Green | 129K | CC-licensed or public domain (NPTEL, Khan, MIT OCW, Yale OYC, Taiwan OCW) |
+| 🟡 Yellow | 3.99M | Standard YouTube license, fair use for research |
+| 🟠 Orange | 300K | Commercial/copyrighted, needs review |
+| 🔴 Red | 72K | Non-educational (gaming, music, vlogs) — excluded from transcription |
 
-- `discover_channels_10M.py` — Extract channels from existing videos, crawl full catalogs, snowball via related channels
-- `discover_related.py` — Exponential discovery via related videos and playlist walking
+### Classification Method
 
-### Cookie Rotation
+1. **Channel/source name matching** — 207K channels classified via pattern matching (universities, conferences, govt agencies, etc.)
+2. **Title analysis** — regex for course codes, "Lecture N", conference names, gaming terms
+3. **Priority fallback** — P8+ videos assumed educational
+4. **CC verification** — YouTube license field + description text mining + publisher website policy checks
 
-YouTube requires authenticated cookies for bulk downloads. Place Netscape-format cookie files in the data directory:
+### Known CC Sources (~72K videos)
 
-```
-~/academic_transcriptions/
-├── cookies_1.txt
-├── cookies_2.txt
-├── cookies_3.txt
-├── cookies_4.txt
-└── cookies_5.txt
-```
+- NPTEL/IIT (~39K) — CC-BY-SA 4.0 (Indian govt funded)
+- Taiwan OCW: NTHU + NYCU (~15K) — CC-BY-NC-SA
+- Khan Academy (~8.5K) — CC-BY-NC-SA 3.0
+- Library of Congress (~5.3K) — Public domain
+- MIT OCW — CC-BY-NC-SA 4.0 (verified from website)
+- Yale OYC — CC-BY-NC-SA 3.0 (verified from website)
 
-Workers auto-discover `cookies*.txt` and rotate by GPU ID.
+## Quality Filter
+
+Videos must pass a two-stage filter:
+
+1. **Duration**: ≥15 minutes (deep educational content only)
+2. **Content**: 40+ reject categories (gaming, music, vlogs, ASMR, pranks, religious sermons, conspiracy, etc.)
+3. **Priority boost**: P9 for university courses/conferences, P8 for lectures/edu creators, P7 for docs/explainers
 
 ## Hardware
 
 | GPU | Model | VRAM | Avg Speed |
 |-----|-------|------|-----------|
-| 0 | RTX 5090 | 32GB | ~169x |
-| 1 | RTX 5090 | 32GB | ~171x |
-| 2 | RTX 4090 | 24GB | ~181x |
-| 3 | RTX 4090 | 24GB | ~183x |
+| 0 | RTX 5090 | 32GB | ~179× |
+| 1 | RTX 5090 | 32GB | ~183× |
+| 2 | RTX 4090 | 24GB | ~226× |
+| 3 | RTX 4090 | 24GB | ~183× |
+
+~2.5GB VRAM per GPU. Rest available for other workloads.
 
 ## Quick Start
 
 ```bash
-pip install faster-whisper librosa numpy
-mkdir -p ~/academic_transcriptions/tmp_gpu{0,1,2,3}
-# Place cookies*.txt and yt-dlp binary in ~/academic_transcriptions/
+pip install faster-whisper librosa numpy huggingface_hub
+mkdir -p ~/academic_transcriptions/{tmp_gpu{0,1,2,3},cookie_pool}
 
-bash launch.sh          # GPU workers
-bash launch_discovery.sh # Discovery crawlers
-python3 src/export_hf.py # Export to HuggingFace
+# Place Netscape-format cookie files in cookie_pool/
+# Place yt-dlp binary in ~/academic_transcriptions/
+
+bash launch.sh              # Start 4 GPU workers
+bash launch_discovery.sh    # Start discovery crawlers
+python3 src/export_hf.py    # Export + push to HuggingFace
 ```
-
-## Dataset
-
-Published on HuggingFace: [`thepowerfuldeez/massive-yt-edu-transcriptions`](https://huggingface.co/datasets/thepowerfuldeez/massive-yt-edu-transcriptions)
 
 ## Files
 
 ```
 ├── README.md
-├── PROGRESS.md
-├── POSTPROCESSING_RESEARCH.md
-├── launch.sh
-├── launch_discovery.sh
-├── watchdog.sh
+├── LICENSING_ANALYSIS.md       # Full licensing report with outreach strategy
+├── POSTPROCESSING_RESEARCH.md  # Why we skip post-processing
+├── launch.sh                   # GPU worker launcher
+├── launch_discovery.sh         # Discovery crawler launcher
+├── watchdog.sh                 # Health check (runs via cron)
 └── src/
-    ├── worker.py
-    ├── postprocess.py
-    ├── discover_channels_10M.py
-    ├── discover_related.py
-    ├── export_hf.py
-    ├── monitor.py
-    └── quality_filter.py
+    ├── worker.py               # GPU transcription worker
+    ├── quality_filter.py       # Content quality/reject patterns
+    ├── discover_related.py     # Related video + playlist discovery
+    ├── discover_channels_10M.py # Channel-based bulk discovery
+    ├── discover_safe.py        # CC-focused safe content discovery
+    ├── discover_cc.py          # CC content chain discovery
+    ├── fetch_descriptions.py   # Batch description + license fetcher
+    ├── batch_license_scan.py   # YouTube Data API license scanner
+    ├── export_hf.py            # Transcription dataset export
+    ├── export_queue_hf.py      # Queue metadata export
+    └── monitor.py              # Real-time progress monitor
 ```
 
-## Post-Processing Research
+## Fair Use Analysis
 
-Investigated ITN, punctuation restoration, and truecasing. **Conclusion: Whisper large-v3 output is already production-quality** — proper punctuation, capitalization, and readability out of the box. See [POSTPROCESSING_RESEARCH.md](POSTPROCESSING_RESEARCH.md) for full benchmarks.
+This dataset is built under fair use for ML research:
+
+- **Transformative**: Audio → text, different medium and purpose
+- **Factual content**: Educational lectures are factual, not creative works
+- **No market substitution**: Text transcripts don't replace video lectures
+- **Research purpose**: Dataset for training/evaluating language models
+
+See [LICENSING_ANALYSIS.md](LICENSING_ANALYSIS.md) for the full legal framework and outreach strategy.
 
 ## License
 
