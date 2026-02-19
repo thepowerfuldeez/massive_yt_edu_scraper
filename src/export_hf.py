@@ -63,6 +63,18 @@ def export_jsonl():
     if writer:
         writer.close()
     
+    if writer:
+        pass  # already closed above
+    
+    conn2 = sqlite3.connect(DB_PATH, timeout=30)
+    stats = conn2.execute(
+        "SELECT SUM(length(transcript)), SUM(duration_seconds) "
+        "FROM videos WHERE status='completed' AND transcript IS NOT NULL"
+    ).fetchone()
+    total_chars = int(stats[0] or 0)
+    total_duration = int(stats[1] or 0)
+    conn2.close()
+    
     conn.close()
     print(f"Exported {exported} records in {chunk_num + 1} file(s)")
     
@@ -108,8 +120,9 @@ Large-scale educational content transcribed from YouTube using distil-whisper.
 ## Stats
 
 - **Videos**: {exported:,}
-- **Estimated tokens**: ~{exported * 7000 // 1000000}M (avg ~7K tokens per video)
-- **Audio hours**: ~{exported * 35 // 60:,} (avg ~35 min per video)
+- **Characters**: ~{total_chars:,}
+- **Estimated tokens**: ~{total_chars // 4 // 1000000}M
+- **Audio hours**: ~{total_duration // 3600:,}
 
 ## Fields
 
@@ -122,6 +135,7 @@ Large-scale educational content transcribed from YouTube using distil-whisper.
 | `source` | Channel/course/university |
 | `url` | YouTube URL |
 | `priority` | Educational priority (9=university course, 8=lecture, 7=documentary, 5=general) |
+| `speed_ratio` | Transcription speed (realtime multiplier) |
 
 ## Priority Distribution
 
