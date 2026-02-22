@@ -6,9 +6,9 @@ Autonomous pipeline for transcribing YouTube educational content at scale. Uses 
 
 | Metric | Value |
 |--------|-------|
-| **Transcribed** | 59,344 videos (~35,876 audio hours) |
-| **Characters** | 1.54B (~384M tokens) |
-| **Queue** | 4.32M pending (4.54M total discovered) |
+| **Transcribed** | 86,138 videos (~60,742 audio hours) |
+| **Characters** | 2.58B (~644M tokens) |
+| **Queue** | 5.39M pending (5.65M total discovered) |
 | **Speed** | 165–185× realtime per GPU |
 | **Throughput** | ~550 videos/hr (4 GPUs) |
 
