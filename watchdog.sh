@@ -12,7 +12,7 @@ NUM_GPUS=8
 for gpu in $(seq 0 $((NUM_GPUS - 1))); do
     if ! pgrep -f "worker.py $gpu" > /dev/null 2>&1; then
         echo "[watchdog] GPU $gpu DEAD — restarting..."
-        CUDA_VISIBLE_DEVICES=$gpu nohup python3 -u src/worker.py $gpu > /tmp/gpu_${gpu}.log 2>&1 &
+        CUDA_VISIBLE_DEVICES=$gpu nohup python3 -u src/worker.py $gpu > /tmp/worker_gpu${gpu}.log 2>&1 &
         sleep 10  # let model load
     fi
 done
@@ -37,7 +37,7 @@ nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader
 # Recent throughput from logs
 echo "[watchdog] Latest per-GPU:"
 for gpu in $(seq 0 $((NUM_GPUS - 1))); do
-    last=$(grep "\[GPU $gpu\] #" /tmp/gpu_${gpu}.log 2>/dev/null | tail -1)
+    last=$(grep "\[GPU $gpu\] #" /tmp/worker_gpu${gpu}.log 2>/dev/null | tail -1)
     if [ -n "$last" ]; then
         echo "  $last"
     else

@@ -15,7 +15,7 @@ WORK_DIR = os.path.expanduser("~/academic_transcriptions")
 YTDLP = os.path.join(WORK_DIR, "yt-dlp")
 MODEL_ID = "distil-large-v3.5"
 PREFETCH_DEPTH = 5
-PREFETCH_THREADS = 2
+PREFETCH_THREADS = 3
 CLAIM_BATCH = 15
 AUDIO_SPEED = 1.2
 MAX_DOWNLOAD_RETRIES = 3
@@ -222,14 +222,13 @@ def mark_error(video_id, error):
 
 # === Download ===
 def download_audio(video_id, tmp_dir, cookie_file=None):
-    """Download audio as mp3 at 1.2x speed, return (file_path, duration) or None.
-    
-    Pipeline: yt-dlp downloads webm → ffmpeg converts to mp3 with atempo=1.2x.
-    The 1.2x speedup saves 17% GPU time. mp3 is smaller for temp storage.
+    """Download audio as native opus/webm (no conversion), return (file_path, duration) or None.
+
+    Pipeline: yt-dlp downloads low-bitrate audio directly (no mp3 conversion).
+    faster-whisper reads opus/webm natively via internal ffmpeg.
     Uses process group kill to prevent zombie ffmpeg on timeout.
     """
     out_template = os.path.join(tmp_dir, f"{video_id}.%(ext)s")
-    out_path = os.path.join(tmp_dir, f"{video_id}.mp3")
 
     for attempt in range(MAX_DOWNLOAD_RETRIES):
         try:
@@ -239,16 +238,15 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
                 cmd += ["--proxy", proxy]
             if cookie_file:
                 cmd += ["--cookies", cookie_file]
-            # Step 1: download + extract audio WITHOUT atempo filter
-            # (atempo conflicts with HLS streamcopy, so we apply it separately)
+            # Download lowest-bitrate audio directly — no conversion needed
+            # faster-whisper reads opus/webm/m4a natively
             cmd += [
-                "-x", "--audio-format", "mp3", "--audio-quality", "5",
+                "-f", "ba[abr<=96]/wa/ba",
                 "-o", out_template, "--no-playlist",
                 "--socket-timeout", "30", "--retries", "3",
                 "--no-check-certificates",
                 f"https://www.youtube.com/watch?v={video_id}",
             ]
-            # Popen with process group so timeout kills yt-dlp + ffmpeg children
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      text=True, cwd=WORK_DIR, start_new_session=True)
             try:
@@ -262,13 +260,12 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
                 proc.wait()
                 raise
 
-            if not os.path.exists(out_path):
-                matches = [f for f in glob.glob(os.path.join(tmp_dir, f"{video_id}.*"))
-                           if not f.endswith(".part")]
-                out_path = matches[0] if matches else None
+            # Find the output file (could be .webm, .m4a, .opus, etc.)
+            matches = [f for f in glob.glob(os.path.join(tmp_dir, f"{video_id}.*"))
+                       if not f.endswith(".part")]
+            out_path = matches[0] if matches else None
 
             if not out_path or not os.path.exists(str(out_path)):
-                # Extract error reason from yt-dlp stderr
                 err_msg = ""
                 if stderr:
                     for line in stderr.strip().split("\n"):
@@ -289,7 +286,7 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
             if proxy:
                 mark_proxy_ok(proxy)
 
-            # Get original duration via ffprobe BEFORE speedup
+            # Get duration via ffprobe (before atempo)
             try:
                 probe = subprocess.run(
                     ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
@@ -299,19 +296,19 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
             except Exception:
                 duration = 0
 
-            # Step 2: apply atempo speedup with ffmpeg (separate from download)
-            sped_path = os.path.join(tmp_dir, f"{video_id}_fast.mp3")
+            # Apply atempo speedup (saves 17% GPU transcription time)
+            sped_path = os.path.join(tmp_dir, f"{video_id}_fast.opus")
             try:
                 ffmpeg_proc = subprocess.run(
                     ["ffmpeg", "-y", "-i", out_path,
                      "-filter:a", f"atempo={AUDIO_SPEED}",
-                     "-vn", "-q:a", "5", sped_path],
+                     "-vn", "-c:a", "libopus", "-b:a", "48k", sped_path],
                     capture_output=True, text=True, timeout=300)
                 if ffmpeg_proc.returncode == 0 and os.path.exists(sped_path):
                     os.unlink(out_path)
-                    os.rename(sped_path, out_path)
+                    out_path = sped_path
                 else:
-                    # atempo failed — use original (slightly slower transcription, still works)
+                    # atempo failed — use original (still works, just slower)
                     try:
                         os.unlink(sped_path)
                     except OSError:
@@ -321,14 +318,6 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
                     os.unlink(sped_path)
                 except OSError:
                     pass
-
-            # Clean up intermediate files, keep only mp3
-            for f in glob.glob(os.path.join(tmp_dir, f"{video_id}.*")):
-                if f != out_path:
-                    try:
-                        os.unlink(f)
-                    except OSError:
-                        pass
 
             return out_path, duration
 
