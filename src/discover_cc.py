@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 DB_PATH = os.path.expanduser("~/academic_transcriptions/massive_production.db")
 YTDLP = os.path.expanduser("~/academic_transcriptions/yt-dlp")
-MIN_DURATION = 900
+MIN_DURATION = 300
 
 REJECT_PATTERNS = re.compile(
     r'\b(music video|official video|lyric|trailer|reaction|unboxing|prank|asmr|mukbang|'
@@ -90,31 +90,27 @@ def get_cc_seeds(batch_size=100):
     return [r[0] for r in rows]
 
 def get_cc_channels():
-    """Find channels with high CC rates from scanned videos."""
+    """Find channels with CC-licensed videos from common-pile/youtube data."""
     conn = get_db()
-    # Find channels where >30% of scanned videos are CC
-    # We use the youtube_license field from the API scan
+    # Use channel_id field populated from common-pile merge
     rows = conn.execute("""
-        SELECT university, 
-               COUNT(*) as total,
-               SUM(CASE WHEN youtube_license = 'creativeCommon' THEN 1 ELSE 0 END) as cc_count
-        FROM videos 
-        WHERE youtube_license IN ('creativeCommon', 'youtube')
-        AND university != '' AND university NOT LIKE '%crawl%' AND university NOT LIKE '%search%'
-        GROUP BY university
-        HAVING total >= 5 AND cc_count * 1.0 / total > 0.3
+        SELECT channel_id, COUNT(*) as cc_count
+        FROM videos
+        WHERE youtube_license = 'creativeCommon'
+          AND channel_id IS NOT NULL AND channel_id != ''
+        GROUP BY channel_id
         ORDER BY cc_count DESC
-        LIMIT 100
     """).fetchall()
     conn.close()
-    return [(r[0], r[1], r[2]) for r in rows]
+    return [(r[0], r[1], r[1]) for r in rows]
 
 def fetch_related(video_id):
     """Fetch related/recommended videos from a seed."""
     cookie = get_cookie()
     cmd = [YTDLP, f"https://youtube.com/watch?v={video_id}",
            "--dump-json", "--no-download", "--no-warnings", "--quiet",
-           "--js-runtimes", "node", "--socket-timeout", "15"]
+           "--js-runtimes", "node", "--remote-components", "ejs:github",
+           "--sleep-requests", "2", "--socket-timeout", "15"]
     if cookie: cmd.extend(["--cookies", cookie])
     
     try:
@@ -148,7 +144,8 @@ def crawl_channel(channel_id, max_videos=300):
     cmd = [YTDLP, url,
            "--dump-json", "--flat-playlist", "--no-download",
            "--no-warnings", "--quiet",
-           "--js-runtimes", "node", "--socket-timeout", "20",
+           "--js-runtimes", "node", "--remote-components", "ejs:github",
+           "--sleep-requests", "2", "--socket-timeout", "20",
            "--playlist-end", str(max_videos)]
     if cookie: cmd.extend(["--cookies", cookie])
     
@@ -176,7 +173,8 @@ def yt_search(query, max_results=100):
     cmd = [YTDLP, f"ytsearch{max_results}:{query}",
            "--dump-json", "--flat-playlist", "--no-download",
            "--no-warnings", "--quiet",
-           "--js-runtimes", "node", "--socket-timeout", "15",
+           "--js-runtimes", "node", "--remote-components", "ejs:github",
+           "--sleep-requests", "2", "--socket-timeout", "15",
            "--match-filter", f"duration >= {MIN_DURATION}"]
     if cookie: cmd.extend(["--cookies", cookie])
     
@@ -262,19 +260,17 @@ def main():
         print(f"{'='*60}")
         
         cc_channels = get_cc_channels()
-        print(f"  Found {len(cc_channels)} channels with >30% CC rate")
-        
-        for src, total, cc_count in cc_channels[:10]:
-            pct = cc_count / total * 100
-            # Try to extract channel ID from source field
-            # These are stored in university field from discovery
-            print(f"  Crawling source '{src[:50]}' ({cc_count}/{total} = {pct:.0f}% CC)")
-            # Search for more from this source
-            videos = yt_search(f"{src} lecture", 50)
-            n = insert_videos(videos, f'cc_channel_expand:{src[:30]}')
+        print(f"  Found {len(cc_channels)} CC channels to crawl")
+
+        # Pick a batch of channels to crawl this round
+        batch = cc_channels[round_num*20:(round_num+1)*20] if len(cc_channels) > 20 else cc_channels
+        for i, (ch_id, total, cc_count) in enumerate(batch):
+            print(f"  [{i+1}/{len(batch)}] Crawling channel {ch_id} ({cc_count} CC videos)")
+            videos = crawl_channel(ch_id, max_videos=500)
+            n = insert_videos(videos, f'cc_channel:{ch_id}')
             round_added += n
             print(f"    Found {len(videos)} videos, {n} new")
-            time.sleep(random.uniform(2, 5))
+            time.sleep(random.uniform(3, 8))
         
         # Phase 3: CC-focused searches
         print(f"\n{'='*60}")

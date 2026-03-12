@@ -20,6 +20,73 @@ CLAIM_BATCH = 15
 AUDIO_SPEED = 1.2
 MAX_DOWNLOAD_RETRIES = 3
 
+# Proxy rotation: proxy_pool.txt has fast ISP proxies first, slow fallbacks after.
+# Each GPU gets assigned a primary fast proxy. On failure, falls back to others.
+PROXY_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "proxy_pool.txt")
+
+def load_proxy_pool():
+    fast = []
+    slow = []
+    section = "fast"
+    try:
+        with open(PROXY_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith("# Slow") or line.startswith("# slow") or line.startswith("# fallback"):
+                    section = "slow"
+                    continue
+                if line.startswith("#"):
+                    continue
+                if section == "fast":
+                    fast.append(line)
+                else:
+                    slow.append(line)
+        total = len(fast) + len(slow)
+        if total:
+            print(f"[GPU {GPU_ID}] Proxy pool: {len(fast)} fast + {len(slow)} fallback", flush=True)
+        return fast, slow
+    except FileNotFoundError:
+        return [], []
+
+_fast_proxies, _slow_proxies = load_proxy_pool()
+_proxy_failures = {}  # proxy -> consecutive failure count
+_proxy_lock = threading.Lock()
+
+def get_proxy():
+    """Get best available proxy. Each GPU prefers its own fast proxy, fallback on failure."""
+    with _proxy_lock:
+        # Try fast proxies first, starting from GPU's assigned one
+        if _fast_proxies:
+            for offset in range(len(_fast_proxies)):
+                idx = (GPU_ID + offset) % len(_fast_proxies)
+                proxy = _fast_proxies[idx]
+                if _proxy_failures.get(proxy, 0) < 3:
+                    return proxy
+        # Fall back to slow proxies
+        for proxy in _slow_proxies:
+            if _proxy_failures.get(proxy, 0) < 5:
+                return proxy
+        # Everything failed — reset and try again
+        _proxy_failures.clear()
+        if _fast_proxies:
+            return _fast_proxies[GPU_ID % len(_fast_proxies)]
+        if _slow_proxies:
+            return _slow_proxies[0]
+        return None
+
+def mark_proxy_ok(proxy):
+    with _proxy_lock:
+        _proxy_failures.pop(proxy, None)
+
+def mark_proxy_fail(proxy):
+    with _proxy_lock:
+        _proxy_failures[proxy] = _proxy_failures.get(proxy, 0) + 1
+        n = _proxy_failures[proxy]
+        if n >= 3:
+            print(f"[GPU {GPU_ID}] Proxy {proxy.split('@')[-1]} failed {n}x, will try next", flush=True)
+
 # Each download thread picks a cookie round-robin from the pool.
 # On consecutive failures, rotate to next cookie and back off.
 import shutil
@@ -88,7 +155,7 @@ def refill_claims():
             n = max(int(CLAIM_BATCH * frac), 1)
             rows = conn.execute(
                 f"SELECT video_id FROM videos WHERE status='pending' "
-                f"AND (duration_seconds >= 900 OR duration_seconds IS NULL OR duration_seconds = 0) "
+                f"AND (duration_seconds >= 300 OR duration_seconds IS NULL OR duration_seconds = 0) "
                 f"AND ({cond}) ORDER BY RANDOM() LIMIT ?", (n,)
             ).fetchall()
             all_ids.extend(r[0] for r in rows)
@@ -97,7 +164,7 @@ def refill_claims():
             # Fallback: grab anything pending (excluding RED)
             rows = conn.execute(
                 "SELECT video_id FROM videos WHERE status='pending' "
-                "AND (duration_seconds >= 900 OR duration_seconds IS NULL OR duration_seconds = 0) "
+                "AND (duration_seconds >= 300 OR duration_seconds IS NULL OR duration_seconds = 0) "
                 "AND (license_risk IS NULL OR license_risk != 'red') "
                 "ORDER BY RANDOM() LIMIT ?", (CLAIM_BATCH,)
             ).fetchall()
@@ -166,22 +233,26 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
 
     for attempt in range(MAX_DOWNLOAD_RETRIES):
         try:
-            cmd = [YTDLP, "--js-runtimes", "node"]
+            cmd = [YTDLP, "--js-runtimes", "node", "--remote-components", "ejs:github"]
+            proxy = get_proxy()
+            if proxy:
+                cmd += ["--proxy", proxy]
             if cookie_file:
                 cmd += ["--cookies", cookie_file]
+            # Step 1: download + extract audio WITHOUT atempo filter
+            # (atempo conflicts with HLS streamcopy, so we apply it separately)
             cmd += [
                 "-x", "--audio-format", "mp3", "--audio-quality", "5",
-                "--postprocessor-args", f"ffmpeg:-filter:a atempo={AUDIO_SPEED}",
                 "-o", out_template, "--no-playlist",
                 "--socket-timeout", "30", "--retries", "3",
-                "--no-warnings", "--no-check-certificates",
+                "--no-check-certificates",
                 f"https://www.youtube.com/watch?v={video_id}",
             ]
             # Popen with process group so timeout kills yt-dlp + ffmpeg children
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      text=True, cwd=WORK_DIR, start_new_session=True)
             try:
-                proc.communicate(timeout=900)
+                stdout, stderr = proc.communicate(timeout=900)
             except subprocess.TimeoutExpired:
                 import signal
                 try:
@@ -196,26 +267,62 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
                            if not f.endswith(".part")]
                 out_path = matches[0] if matches else None
 
-            if not out_path or not os.path.exists(out_path):
+            if not out_path or not os.path.exists(str(out_path)):
+                # Extract error reason from yt-dlp stderr
+                err_msg = ""
+                if stderr:
+                    for line in stderr.strip().split("\n"):
+                        if "ERROR" in line:
+                            err_msg = line.strip()[-120:]
+                            break
+                if proxy:
+                    mark_proxy_fail(proxy)
                 if attempt < MAX_DOWNLOAD_RETRIES - 1:
                     wait = (2 ** attempt) * 5 + random.random() * 5
                     print(f"[GPU {GPU_ID}] Download failed {video_id}, "
-                          f"retry {attempt+1}/{MAX_DOWNLOAD_RETRIES} in {wait:.0f}s", flush=True)
+                          f"retry {attempt+1}/{MAX_DOWNLOAD_RETRIES} in {wait:.0f}s"
+                          f"{' | ' + err_msg if err_msg else ''}", flush=True)
                     time.sleep(wait)
                     continue
                 return None
 
-            # Get duration via ffprobe (fast)
+            if proxy:
+                mark_proxy_ok(proxy)
+
+            # Get original duration via ffprobe BEFORE speedup
             try:
                 probe = subprocess.run(
                     ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
                      "-of", "default=noprint_wrappers=1:nokey=1", out_path],
                     capture_output=True, text=True, timeout=10)
-                duration = float(probe.stdout.strip()) * AUDIO_SPEED  # original duration
+                duration = float(probe.stdout.strip())
             except Exception:
                 duration = 0
 
-            # Clean up webm/intermediate files, keep only mp3
+            # Step 2: apply atempo speedup with ffmpeg (separate from download)
+            sped_path = os.path.join(tmp_dir, f"{video_id}_fast.mp3")
+            try:
+                ffmpeg_proc = subprocess.run(
+                    ["ffmpeg", "-y", "-i", out_path,
+                     "-filter:a", f"atempo={AUDIO_SPEED}",
+                     "-vn", "-q:a", "5", sped_path],
+                    capture_output=True, text=True, timeout=300)
+                if ffmpeg_proc.returncode == 0 and os.path.exists(sped_path):
+                    os.unlink(out_path)
+                    os.rename(sped_path, out_path)
+                else:
+                    # atempo failed — use original (slightly slower transcription, still works)
+                    try:
+                        os.unlink(sped_path)
+                    except OSError:
+                        pass
+            except Exception:
+                try:
+                    os.unlink(sped_path)
+                except OSError:
+                    pass
+
+            # Clean up intermediate files, keep only mp3
             for f in glob.glob(os.path.join(tmp_dir, f"{video_id}.*")):
                 if f != out_path:
                     try:

@@ -2,7 +2,7 @@
 """Real-time progress monitor."""
 import sqlite3, time, os
 
-DB = os.environ.get("DB_PATH", os.path.join(os.path.dirname(__file__), "data.db"))
+DB = os.environ.get("DB_PATH", os.path.expanduser("~/academic_transcriptions/massive_production.db"))
 
 def monitor():
     while True:
