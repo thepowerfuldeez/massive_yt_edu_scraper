@@ -10,13 +10,15 @@ import os, sys, time, random, sqlite3, subprocess, glob, threading, queue, trace
 import numpy as np
 
 GPU_ID = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+INSTANCE = int(sys.argv[2]) if len(sys.argv) > 2 else 0  # 0 or 1 per GPU
+WORKER_TAG = f"GPU {GPU_ID}.{INSTANCE}" if INSTANCE else f"GPU {GPU_ID}"
 DB_PATH = os.path.expanduser("~/academic_transcriptions/massive_production.db")
 WORK_DIR = os.path.expanduser("~/academic_transcriptions")
 YTDLP = os.path.join(WORK_DIR, "yt-dlp")
 MODEL_ID = "distil-large-v3.5"
-PREFETCH_DEPTH = 10
+PREFETCH_DEPTH = 5
 PREFETCH_THREADS = 2
-CLAIM_BATCH = 15
+CLAIM_BATCH = 10
 AUDIO_SPEED = 1.2
 MAX_DOWNLOAD_RETRIES = 3
 
@@ -45,7 +47,7 @@ def load_proxy_pool():
                     slow.append(line)
         total = len(fast) + len(slow)
         if total:
-            print(f"[GPU {GPU_ID}] Proxy pool: {len(fast)} fast + {len(slow)} fallback", flush=True)
+            print(f"[{WORKER_TAG}] Proxy pool: {len(fast)} fast + {len(slow)} fallback", flush=True)
         return fast, slow
     except FileNotFoundError:
         return [], []
@@ -54,13 +56,15 @@ _fast_proxies, _slow_proxies = load_proxy_pool()
 _proxy_failures = {}  # proxy -> consecutive failure count
 _proxy_lock = threading.Lock()
 
+WORKER_IDX = GPU_ID * 2 + INSTANCE  # unique index 0..15 for 1:1 proxy mapping
+
 def get_proxy():
-    """Get best available proxy. Each GPU prefers its own fast proxy, fallback on failure."""
+    """Get best available proxy. Each worker instance gets its own dedicated proxy."""
     with _proxy_lock:
-        # Try fast proxies first, starting from GPU's assigned one
+        # Try fast proxies first, starting from this worker's assigned one
         if _fast_proxies:
             for offset in range(len(_fast_proxies)):
-                idx = (GPU_ID + offset) % len(_fast_proxies)
+                idx = (WORKER_IDX + offset) % len(_fast_proxies)
                 proxy = _fast_proxies[idx]
                 if _proxy_failures.get(proxy, 0) < 3:
                     return proxy
@@ -71,7 +75,7 @@ def get_proxy():
         # Everything failed — reset and try again
         _proxy_failures.clear()
         if _fast_proxies:
-            return _fast_proxies[GPU_ID % len(_fast_proxies)]
+            return _fast_proxies[WORKER_IDX % len(_fast_proxies)]
         if _slow_proxies:
             return _slow_proxies[0]
         return None
@@ -85,7 +89,7 @@ def mark_proxy_fail(proxy):
         _proxy_failures[proxy] = _proxy_failures.get(proxy, 0) + 1
         n = _proxy_failures[proxy]
         if n >= 3:
-            print(f"[GPU {GPU_ID}] Proxy {proxy.split('@')[-1]} failed {n}x, will try next", flush=True)
+            print(f"[{WORKER_TAG}] Proxy {proxy.split('@')[-1]} failed {n}x, will try next", flush=True)
 
 # Each download thread picks a cookie round-robin from the pool.
 # On consecutive failures, rotate to next cookie and back off.
@@ -98,7 +102,7 @@ import shutil
     return files
 
 _cookie_lock = threading.Lock()
-_cookie_counter = GPU_ID  # offset so each GPU starts on a different cookie
+_cookie_counter = GPU_ID * 2 + INSTANCE  # offset so each instance starts on a different cookie
 
 def get_thread_cookie_file(thread_idx):
     """Return a per-thread cookie file copied from the pool (round-robin)."""
@@ -108,7 +112,7 @@ def get_thread_cookie_file(thread_idx):
         _cookie_counter += 1
     dst = os.path.join(WORK_DIR, f"cookies_gpu{GPU_ID}_t{thread_idx}.txt")
     shutil.copy2(src, dst)
-    print(f"[GPU {GPU_ID}] Thread {thread_idx} using cookie: {os.path.basename(src)}", flush=True)
+    print(f"[{WORKER_TAG}] Thread {thread_idx} using cookie: {os.path.basename(src)}", flush=True)
     return dst
 
 def rotate_cookie(thread_idx):
@@ -183,7 +187,7 @@ def refill_claims():
         conn.commit()
         return rows
     except Exception as e:
-        print(f"[GPU {GPU_ID}] Claim error: {e}", flush=True)
+        print(f"[{WORKER_TAG}] Claim error: {e}", flush=True)
         return []
     finally:
         conn.close()
@@ -276,7 +280,7 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
                     mark_proxy_fail(proxy)
                 if attempt < MAX_DOWNLOAD_RETRIES - 1:
                     wait = (2 ** attempt) * 5 + random.random() * 5
-                    print(f"[GPU {GPU_ID}] Download failed {video_id}, "
+                    print(f"[{WORKER_TAG}] Download failed {video_id}, "
                           f"retry {attempt+1}/{MAX_DOWNLOAD_RETRIES} in {wait:.0f}s"
                           f"{' | ' + err_msg if err_msg else ''}", flush=True)
                     time.sleep(wait)
@@ -306,7 +310,7 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
                     pass
             if attempt < MAX_DOWNLOAD_RETRIES - 1:
                 wait = (2 ** attempt) * 5 + random.random() * 5
-                print(f"[GPU {GPU_ID}] Download error {video_id}: {e}, "
+                print(f"[{WORKER_TAG}] Download error {video_id}: {e}, "
                       f"retry {attempt+1}/{MAX_DOWNLOAD_RETRIES} in {wait:.0f}s", flush=True)
                 time.sleep(wait)
             else:
@@ -316,7 +320,7 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
 
 # === Prefetch + async atempo ===
 prefetch_q = queue.Queue(maxsize=PREFETCH_DEPTH + 1)
-tmp_dir = os.path.join(WORK_DIR, f"tmp_gpu{GPU_ID}")
+tmp_dir = os.path.join(WORK_DIR, f"tmp_gpu{GPU_ID}_{INSTANCE}")
 os.makedirs(tmp_dir, exist_ok=True)
 
 
@@ -348,13 +352,13 @@ def apply_atempo(vid, title, audio_path, dur):
 
 # Thread pool for async atempo — doesn't block download threads
 from concurrent.futures import ThreadPoolExecutor
-_atempo_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix=f"atempo_gpu{GPU_ID}")
+_atempo_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"atempo_gpu{GPU_ID}_{INSTANCE}")
 
 
 def prefetcher(thread_idx):
     cookie_file = get_thread_cookie_file(thread_idx)
     consec_fails = 0
-    print(f"[GPU {GPU_ID}] Prefetch thread {thread_idx} started", flush=True)
+    print(f"[{WORKER_TAG}] Prefetch thread {thread_idx} started", flush=True)
     while True:
         try:
             if prefetch_q.qsize() >= PREFETCH_DEPTH:
@@ -372,7 +376,7 @@ def prefetcher(thread_idx):
                 mark_error(vid, "download_failed")
                 consec_fails += 1
                 if consec_fails >= _FAIL_REFRESH_THRESHOLD:
-                    print(f"[GPU {GPU_ID}] {consec_fails} consecutive download failures, rotating cookies...", flush=True)
+                    print(f"[{WORKER_TAG}] {consec_fails} consecutive download failures, rotating cookies...", flush=True)
                     cookie_file = rotate_cookie(thread_idx)
                     consec_fails = 0
                     time.sleep(10)
@@ -392,23 +396,23 @@ def prefetcher(thread_idx):
             _atempo_pool.submit(apply_atempo, vid, title, audio_path, dur)
             time.sleep(random.uniform(1, 3))  # rate-limit protection
         except Exception as e:
-            print(f"[GPU {GPU_ID}] Prefetch error: {e}", flush=True)
+            print(f"[{WORKER_TAG}] Prefetch error: {e}", flush=True)
 
 
 for _i in range(PREFETCH_THREADS):
     threading.Thread(target=prefetcher, args=(_i,), daemon=True).start()
 
 # === Load model ===
-print(f"[GPU {GPU_ID}] Loading faster-whisper {MODEL_ID} "
+print(f"[{WORKER_TAG}] Loading faster-whisper {MODEL_ID} "
       f"(speed={AUDIO_SPEED}x, {PREFETCH_THREADS} prefetch)...", flush=True)
 
 from faster_whisper import WhisperModel
 
 t0 = time.time()
 model = WhisperModel(MODEL_ID, device="cuda", compute_type="float16")
-print(f"[GPU {GPU_ID}] Model loaded in {time.time()-t0:.1f}s", flush=True)
+print(f"[{WORKER_TAG}] Model loaded in {time.time()-t0:.1f}s", flush=True)
 
-with open(f"/tmp/gpu_{GPU_ID}_ready", "w") as f:
+with open(f"/tmp/gpu_{GPU_ID}_{INSTANCE}_ready", "w") as f:
     f.write(str(os.getpid()))
 
 # === Main transcription loop ===
@@ -421,7 +425,7 @@ while True:
     try:
         vid, title, audio_path, dur = prefetch_q.get(timeout=60)
     except queue.Empty:
-        print(f"[GPU {GPU_ID}] Prefetch queue empty 60s, waiting...", flush=True)
+        print(f"[{WORKER_TAG}] Prefetch queue empty 60s, waiting...", flush=True)
         continue
 
     try:
@@ -451,12 +455,12 @@ while True:
                 hours_done = total_audio_s / 3600
                 qsize = prefetch_q.qsize()
                 rate_per_h = completed / ((time.time() - start_time) / 3600) if time.time() > start_time else 0
-                print(f"[GPU {GPU_ID}] #{completed}: {dur/60:.1f}min->{transcribe_s:.1f}s={speed:.0f}x | "
+                print(f"[{WORKER_TAG}] #{completed}: {dur/60:.1f}min->{transcribe_s:.1f}s={speed:.0f}x | "
                       f"avg={avg_speed:.0f}x | {hours_done:.1f}h | q={qsize} | {rate_per_h:.0f}/hr", flush=True)
         else:
             mark_error(vid, "empty_transcript")
     except Exception as e:
-        print(f"[GPU {GPU_ID}] ERROR: {traceback.format_exc()}", flush=True)
+        print(f"[{WORKER_TAG}] ERROR: {traceback.format_exc()}", flush=True)
         mark_error(vid, str(e))
         try:
             os.unlink(audio_path)

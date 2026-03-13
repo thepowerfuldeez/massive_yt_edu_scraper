@@ -11,6 +11,7 @@ tmp_gpu*/
 venv/
 __pycache__/
 *.pyc
+*.egg-info/
 .env
 hf_export/
 data/

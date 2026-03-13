@@ -1,142 +1,227 @@
 # Massive YouTube Educational Transcription
 
-Autonomous pipeline for transcribing YouTube educational content at scale. Uses faster-whisper on multi-GPU to produce a large open educational text dataset.
+Autonomous pipeline for transcribing YouTube educational content at scale.
+Two-stage architecture: **downloader** (CPU, N threads) feeds **Qwen3-ASR** transcribers (8x GPU, offline vLLM).
 
-## Current Stats
+## Quick Start (new machine)
 
-| Metric | Value |
-|--------|-------|
-| **Transcribed** | 86,138 videos (~60,742 audio hours) |
-| **Characters** | 2.58B (~644M tokens) |
-| **Queue** | 5.39M pending (5.65M total discovered) |
-| **Speed** | 165–185× realtime per GPU |
-| **Throughput** | ~550 videos/hr (4 GPUs) |
+```bash
+# 1. Clone and install
+git clone <repo-url> && cd massive_yt_edu_scraper
+uv venv venv --python 3.12
+source venv/bin/activate
+uv pip install -e "." --index-strategy unsafe-best-match
 
-## Datasets
+# 2. Place config files
+cp proxy_pool.example.txt proxy_pool.txt   # edit with your proxies
+echo "YT_API_KEY=..." > .env               # for discovery scripts
 
-| Dataset | Description |
-|---------|-------------|
-| [massive-yt-edu-transcriptions](https://huggingface.co/datasets/thepowerfuldeez/massive-yt-edu-transcriptions) | Full transcripts (daily auto-push) |
-| [massive-yt-edu-queue](https://huggingface.co/datasets/thepowerfuldeez/massive-yt-edu-queue) | 4.5M video metadata with content classification + license risk |
+# 3. Bootstrap or pull DB
+python3 src/reconstruct_queue.py           # from HuggingFace datasets
+# OR
+python3 src/s3_sync.py pull --bucket <bucket>  # from S3
+
+# 4. Launch everything
+./run.sh                                   # downloader + 8 transcribers + discovery
+./run.sh status                            # monitor
+bash watchdog.sh                           # health check + restart dead workers
+```
 
 ## Architecture
 
 ```
 SQLite DB (WAL mode) ← single source of truth
-├── GPU Workers (4×)
-│   ├── 2 prefetch threads each (yt-dlp + ffmpeg 1.2× atempo → mp3)
-│   └── faster-whisper CTranslate2 (distil-large-v3.5, beam=1, no VAD)
+├── Downloader (CPU, N threads)
+│   ├── atempo 1.2x for >30min videos
+│   └── Outputs to ~/academic_transcriptions/audio_queue/
+├── Transcribers (8x GPU, Qwen3-ASR-1.7B via offline vLLM)
+│   ├── Claims 'downloaded' files from DB
+│   ├── Batch inference (sorted by duration)
+│   └── Writes transcript to DB, deletes audio
 ├── Discovery Crawlers
-│   ├── Channel crawler (full catalog extraction, snowball via related)
-│   ├── Related video walker (playlist + recommendation chains)
-│   └── CC-focused discovery (known OCW channels + CC search filters)
-├── License Scanner
-│   ├── yt-dlp description + license field fetcher
-│   └── YouTube Data API v3 batch scanner (50 IDs/request)
-└── HuggingFace Export (daily cron)
+│   ├── CC channel crawl (yt-dlp)
+│   └── YouTube Data API (10K units/day, very efficient)
+└── S3 Sync (multi-machine)
+    ├── push/pull full DB
+    ├── split pending work for remote machines
+    └── merge completed transcriptions back
 ```
 
-### Key Design Decisions
+### Pipeline Flow
 
-- **faster-whisper over HF pipeline**: 3.3× faster, 2.5GB VRAM vs 6–8GB (CTranslate2 fused kernels)
-- **1.2× audio speedup**: yt-dlp atempo filter — 17% less GPU work, negligible quality loss
-- **No VAD**: Silero VAD benchmarked — adds overhead on dense educational lectures
-- **beam_size=1**: Max throughput for batch workload
-- **SQLite as queue**: Atomic `UPDATE...RETURNING` claims, WAL mode, no external queue service
-- **Process group kill**: `start_new_session=True` + `os.killpg()` prevents zombie yt-dlp/ffmpeg
-- **Post-processing skipped**: Whisper large-v3 already produces properly punctuated, capitalized text
+```
+pending → [downloader] → downloaded → [transcriber] → completed
+                                   → error (retry via watchdog)
+```
 
-## Content Classification
+## Requirements
 
-Every video is classified by content source and license risk:
+- Python 3.12+, uv
+- 8x NVIDIA GPUs (H200/H100/A100 — any CUDA GPU works)
+- ffmpeg, ffprobe, node (for yt-dlp JS challenge)
 
-| Risk | Count | Description |
-|------|-------|-------------|
-| 🟢 Green | 129K | CC-licensed or public domain (NPTEL, Khan, MIT OCW, Yale OYC, Taiwan OCW) |
-| 🟡 Yellow | 3.99M | Standard YouTube license, fair use for research |
-| 🟠 Orange | 300K | Commercial/copyrighted, needs review |
-| 🔴 Red | 72K | Non-educational (gaming, music, vlogs) — excluded from transcription |
-
-### Classification Method
-
-1. **Channel/source name matching** — 207K channels classified via pattern matching (universities, conferences, govt agencies, etc.)
-2. **Title analysis** — regex for course codes, "Lecture N", conference names, gaming terms
-3. **Priority fallback** — P8+ videos assumed educational
-4. **CC verification** — YouTube license field + description text mining + publisher website policy checks
-
-### Known CC Sources (~72K videos)
-
-- NPTEL/IIT (~39K) — CC-BY-SA 4.0 (Indian govt funded)
-- Taiwan OCW: NTHU + NYCU (~15K) — CC-BY-NC-SA
-- Khan Academy (~8.5K) — CC-BY-NC-SA 3.0
-- Library of Congress (~5.3K) — Public domain
-- MIT OCW — CC-BY-NC-SA 4.0 (verified from website)
-- Yale OYC — CC-BY-NC-SA 3.0 (verified from website)
-
-## Quality Filter
-
-Videos must pass a two-stage filter:
-
-1. **Duration**: ≥15 minutes (deep educational content only)
-2. **Content**: 40+ reject categories (gaming, music, vlogs, ASMR, pranks, religious sermons, conspiracy, etc.)
-3. **Priority boost**: P9 for university courses/conferences, P8 for lectures/edu creators, P7 for docs/explainers
-
-## Hardware
-
-| GPU | Model | VRAM | Avg Speed |
-|-----|-------|------|-----------|
-| 0 | RTX 5090 | 32GB | ~179× |
-| 1 | RTX 5090 | 32GB | ~183× |
-| 2 | RTX 4090 | 24GB | ~226× |
-| 3 | RTX 4090 | 24GB | ~183× |
-
-~2.5GB VRAM per GPU. Rest available for other workloads.
-
-## Quick Start
+## Installation
 
 ```bash
-pip install faster-whisper librosa numpy huggingface_hub
-
-# Place yt-dlp binary in ~/academic_transcriptions/
-
-bash launch.sh              # Start 4 GPU workers
-bash launch_discovery.sh    # Start discovery crawlers
-python3 src/export_hf.py    # Export + push to HuggingFace
+uv venv venv --python 3.12
+source venv/bin/activate
+uv pip install -e "." --index-strategy unsafe-best-match
 ```
+
+Installs: torch (CUDA 12.8), vllm, qwen-asr, faster-whisper, yt-dlp, boto3, datasets, etc.
+
+## Configuration
+
+
+One proxy per line, `http://user:pass@ip:port` format.
+Lines before `# Slow` are fast ISP proxies; lines after are fallbacks.
+
+
+
+
+### Environment (`.env`)
+
+```
+YT_API_KEY=...   # YouTube Data API key (for discovery scripts)
+```
+
+## Running
+
+```bash
+# Full pipeline
+./run.sh                  # launch all: downloader + transcribers + discovery
+./run.sh status           # dashboard
+./run.sh stop             # kill everything
+
+# Individual components
+./run.sh download         # downloader only
+./run.sh transcribe       # transcribers only
+./run.sh discover         # discovery only
+
+# Health check (run via cron every 5 min)
+bash watchdog.sh
+
+# Monitor
+tail -f /tmp/transcriber_gpu0.log
+tail -f /tmp/downloader.log
+```
+
+### Alternative: vLLM Server Mode
+
+Instead of offline mode (default), run a shared vLLM server:
+
+```bash
+./launch_vllm.sh 8                                     # DP=8
+python3 src/transcribe_qwen.py --server http://localhost:8000  # API client
+```
+
+### Legacy: faster-whisper Workers
+
+The original pipeline using faster-whisper (CTranslate2):
+
+```bash
+./launch.sh               # 8x GPU workers with integrated download+transcribe
+```
+
+## S3 Sync (Multi-Machine)
+
+```bash
+# Push DB checkpoint to S3
+python3 src/s3_sync.py push --bucket my-bucket
+
+# Pull latest DB to a new machine
+python3 src/s3_sync.py pull --bucket my-bucket
+
+# Split 100K pending videos for a remote machine
+python3 src/s3_sync.py split --bucket my-bucket --count 100000
+
+# Merge completed work from remote machine
+python3 src/s3_sync.py merge --remote-db /path/to/remote.db
+```
+
+## Export
+
+```bash
+# Local parquet
+python3 src/export_parquet.py
+
+# Push to HuggingFace
+python3 src/export_hf.py
+
+# Push queue metadata to HuggingFace
+python3 src/export_queue_hf.py
+```
+
+## Database Schema
+
+```sql
+CREATE TABLE videos (
+  video_id TEXT PRIMARY KEY,
+  title TEXT, url TEXT, course TEXT, university TEXT,
+  duration_seconds INTEGER, status TEXT DEFAULT 'pending',
+  priority INTEGER DEFAULT 5,
+  transcript TEXT,
+  processing_time_seconds REAL, speed_ratio REAL,
+  completed_at DATETIME, processing_started_at DATETIME, error TEXT,
+  description TEXT, youtube_license TEXT,
+  license_risk TEXT DEFAULT 'yellow',
+  content_category TEXT, channel_id TEXT, tags TEXT, published_time TEXT
+);
+```
+
+**Status flow:** `pending → processing → downloaded → transcribing → completed/error`
+**Dispatched:** Videos split to a remote machine via `s3_sync.py split`
 
 ## Files
 
 ```
-├── README.md
-├── LICENSING_ANALYSIS.md       # Full licensing report with outreach strategy
-├── POSTPROCESSING_RESEARCH.md  # Why we skip post-processing
-├── launch.sh                   # GPU worker launcher
-├── launch_discovery.sh         # Discovery crawler launcher
-├── watchdog.sh                 # Health check (runs via cron)
+├── pyproject.toml             # Dependencies (uv)
+├── run.sh                     # Master launcher
+├── watchdog.sh                # Health check + auto-restart
+├── launch_transcribers.sh     # Qwen3-ASR offline workers
+├── launch_vllm.sh             # vLLM server mode
+├── launch_discovery.sh        # Discovery crawlers
+├── launch.sh                  # Legacy faster-whisper workers
+├── proxy_pool.txt             # Proxy config (gitignored)
+├── .env                       # API keys (gitignored)
 └── src/
-    ├── worker.py               # GPU transcription worker
-    ├── quality_filter.py       # Content quality/reject patterns
-    ├── discover_related.py     # Related video + playlist discovery
-    ├── discover_channels_10M.py # Channel-based bulk discovery
-    ├── discover_safe.py        # CC-focused safe content discovery
-    ├── discover_cc.py          # CC content chain discovery
-    ├── fetch_descriptions.py   # Batch description + license fetcher
-    ├── batch_license_scan.py   # YouTube Data API license scanner
-    ├── export_hf.py            # Transcription dataset export
-    ├── export_queue_hf.py      # Queue metadata export
-    └── monitor.py              # Real-time progress monitor
+    ├── downloader.py          # Download-only pipeline (N threads)
+    ├── transcribe_qwen.py     # Qwen3-ASR batch transcriber
+    ├── worker.py              # Legacy faster-whisper worker
+    ├── s3_sync.py             # S3 push/pull/split/merge
+    ├── discover_cc.py         # CC content discovery (yt-dlp)
+    ├── discover_cc_api.py     # CC discovery (YouTube Data API)
+    ├── discover_related.py    # Related video walking
+    ├── quality_filter.py      # 40+ reject patterns, priority scoring
+    ├── batch_license_scan.py  # YouTube API license scanning
+    ├── convert_cookies.py     # JSON → Netscape cookie conversion
+    ├── reconstruct_queue.py   # Rebuild DB from HuggingFace datasets
+    ├── export_parquet.py      # Export to local parquet
+    ├── export_hf.py           # Export + push to HuggingFace
+    └── export_queue_hf.py     # Queue metadata export
 ```
 
-## Fair Use Analysis
+## Content Classification
 
-This dataset is built under fair use for ML research:
+| Risk | Description |
+|------|-------------|
+| green | CC-licensed or public domain (NPTEL, Khan, MIT OCW, Yale OYC) |
+| yellow | Standard YouTube license, fair use for research |
+| orange | Commercial/copyrighted, needs review |
+| red | Non-educational — excluded from transcription |
 
-- **Transformative**: Audio → text, different medium and purpose
-- **Factual content**: Educational lectures are factual, not creative works
-- **No market substitution**: Text transcripts don't replace video lectures
-- **Research purpose**: Dataset for training/evaluating language models
+## Performance Notes
 
-See [LICENSING_ANALYSIS.md](LICENSING_ANALYSIS.md) for the full legal framework and outreach strategy.
+- 8x H200: Qwen3-ASR batch transcription throughput TBD (benchmarking)
+- Downloader: ~16 concurrent threads, backpressure at 1000 queued files
+- Download is fast; transcription is the bottleneck
+
+## Datasets
+
+| Dataset | Description |
+|---------|-------------|
+| [massive-yt-edu-transcriptions](https://huggingface.co/datasets/thepowerfuldeez/massive-yt-edu-transcriptions) | Full transcripts |
+| [massive-yt-edu-queue](https://huggingface.co/datasets/thepowerfuldeez/massive-yt-edu-queue) | 5.6M video metadata |
 
 ## License
 

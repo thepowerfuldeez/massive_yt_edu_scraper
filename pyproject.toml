@@ -1,0 +1,30 @@
+[project]
+name = "massive-yt-edu-scraper"
+version = "0.2.0"
+description = "Large-scale YouTube educational content transcription pipeline"
+requires-python = ">=3.12"
+dependencies = [
+    # ASR
+    "qwen-asr[vllm]",
+    "faster-whisper>=1.2",
+    # Download
+    "yt-dlp>=2025.1",
+    # Data
+    "datasets",
+    "pyarrow",
+    "pandas",
+    "huggingface_hub",
+    # S3
+    "boto3",
+    # Misc
+    "numpy",
+    "requests",
+]
+
+[project.optional-dependencies]
+dev = ["pre-commit", "ruff"]
+
+[tool.uv]
+# Pin torch index for CUDA 12.8 wheels
+extra-index-url = ["https://download.pytorch.org/whl/cu128"]
+index-strategy = "unsafe-best-match"
