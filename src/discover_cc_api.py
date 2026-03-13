@@ -15,7 +15,7 @@ then paginate playlistItems to get all video IDs.
 import sqlite3, os, sys, time, json, urllib.request, urllib.error, re, random
 
 DB = os.path.expanduser("~/academic_transcriptions/massive_production.db")
-API_KEY = os.environ.get("YT_API_KEY", "AIzaSyAtpiGxOrjltfZ2HOMh1FM0JYHnSr4uQTQ")
+API_KEY = os.environ.get("YT_API_KEY", "")
 MIN_DURATION = 300
 
 REJECT_PATTERNS = re.compile(

@@ -14,8 +14,8 @@ DB_PATH = os.path.expanduser("~/academic_transcriptions/massive_production.db")
 WORK_DIR = os.path.expanduser("~/academic_transcriptions")
 YTDLP = os.path.join(WORK_DIR, "yt-dlp")
 MODEL_ID = "distil-large-v3.5"
-PREFETCH_DEPTH = 5
-PREFETCH_THREADS = 3
+PREFETCH_DEPTH = 10
+PREFETCH_THREADS = 2
 CLAIM_BATCH = 15
 AUDIO_SPEED = 1.2
 MAX_DOWNLOAD_RETRIES = 3
@@ -296,29 +296,6 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
             except Exception:
                 duration = 0
 
-            # Apply atempo speedup (saves 17% GPU transcription time)
-            sped_path = os.path.join(tmp_dir, f"{video_id}_fast.opus")
-            try:
-                ffmpeg_proc = subprocess.run(
-                    ["ffmpeg", "-y", "-i", out_path,
-                     "-filter:a", f"atempo={AUDIO_SPEED}",
-                     "-vn", "-c:a", "libopus", "-b:a", "48k", sped_path],
-                    capture_output=True, text=True, timeout=300)
-                if ffmpeg_proc.returncode == 0 and os.path.exists(sped_path):
-                    os.unlink(out_path)
-                    out_path = sped_path
-                else:
-                    # atempo failed — use original (still works, just slower)
-                    try:
-                        os.unlink(sped_path)
-                    except OSError:
-                        pass
-            except Exception:
-                try:
-                    os.unlink(sped_path)
-                except OSError:
-                    pass
-
             return out_path, duration
 
         except Exception as e:
@@ -337,10 +314,41 @@ def download_audio(video_id, tmp_dir, cookie_file=None):
     return None
 
 
-# === Prefetch ===
+# === Prefetch + async atempo ===
 prefetch_q = queue.Queue(maxsize=PREFETCH_DEPTH + 1)
 tmp_dir = os.path.join(WORK_DIR, f"tmp_gpu{GPU_ID}")
 os.makedirs(tmp_dir, exist_ok=True)
+
+
+def apply_atempo(vid, title, audio_path, dur):
+    """Apply atempo speedup for long videos, then put result in GPU queue."""
+    if dur > 1800:
+        sped_path = os.path.join(tmp_dir, f"{vid}_fast.opus")
+        try:
+            proc = subprocess.run(
+                ["ffmpeg", "-y", "-i", audio_path,
+                 "-filter:a", f"atempo={AUDIO_SPEED}",
+                 "-vn", "-c:a", "libopus", "-b:a", "48k", sped_path],
+                capture_output=True, text=True, timeout=300)
+            if proc.returncode == 0 and os.path.exists(sped_path):
+                os.unlink(audio_path)
+                audio_path = sped_path
+            else:
+                try:
+                    os.unlink(sped_path)
+                except OSError:
+                    pass
+        except Exception:
+            try:
+                os.unlink(sped_path)
+            except OSError:
+                pass
+    prefetch_q.put((vid, title, audio_path, dur))
+
+
+# Thread pool for async atempo — doesn't block download threads
+from concurrent.futures import ThreadPoolExecutor
+_atempo_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix=f"atempo_gpu{GPU_ID}")
 
 
 def prefetcher(thread_idx):
@@ -380,7 +388,8 @@ def prefetcher(thread_idx):
                     pass
                 continue
 
-            prefetch_q.put((vid, title, audio_path, dur))
+            # Submit atempo async — download thread immediately starts next download
+            _atempo_pool.submit(apply_atempo, vid, title, audio_path, dur)
             time.sleep(random.uniform(1, 3))  # rate-limit protection
         except Exception as e:
             print(f"[GPU {GPU_ID}] Prefetch error: {e}", flush=True)

@@ -8,7 +8,7 @@ Stores youtube_license field and reclassifies CC videos to green.
 import sqlite3, os, sys, time, json, urllib.request, urllib.error
 
 DB = os.path.expanduser("~/academic_transcriptions/massive_production.db")
-API_KEY = os.environ.get("YT_API_KEY", "AIzaSyAtpiGxOrjltfZ2HOMh1FM0JYHnSr4uQTQ")
+API_KEY = os.environ.get("YT_API_KEY", "")
 BATCH_SIZE = 50
 # 10K quota/day, 1 unit per request, 50 IDs per request = 500K/day
 # With 0.1s delay = ~18K requests/hr = 900K videos/hr (well within quota)

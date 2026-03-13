@@ -14,3 +14,5 @@ __pycache__/
 .env
 hf_export/
 data/
+proxy_pool.txt
+exports/
