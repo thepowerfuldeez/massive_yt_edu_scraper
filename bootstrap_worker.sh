@@ -95,19 +95,20 @@ start_downloader() {
 
     cat > "${WORKDIR}/run_downloader.py" << PYEOF
 import os, sys, importlib.util
-os.chdir("${REPO}")
-spec = importlib.util.spec_from_file_location("downloader", "${REPO}/src/downloader.py")
-mod = importlib.util.module_from_spec(spec)
-# Patch paths before exec
-mod.DB_PATH = "${DB_PATH}"
-mod.WORK_DIR = "${WORKDIR}"
-mod.QUEUE_DIR = "${QUEUE_DIR}"
-mod.YTDLP = "${WORKDIR}/yt-dlp"
-mod.PROXY_FILE = "${WORKDIR}/proxy_pool.txt"
-mod.COOKIE_POOL_DIR = "${WORKDIR}/cookie_pool"
-sys.modules["downloader"] = mod
-sys.argv = ["downloader", "--threads", "${DL_THREADS}", "--max-queue", "${DL_MAX_QUEUE}", "--queue-dir", "${QUEUE_DIR}"]
-spec.loader.exec_module(mod)
+
+if __name__ == "__main__":
+    os.chdir("${REPO}")
+    spec = importlib.util.spec_from_file_location("downloader", "${REPO}/src/downloader.py")
+    mod = importlib.util.module_from_spec(spec)
+    mod.DB_PATH = "${DB_PATH}"
+    mod.WORK_DIR = "${WORKDIR}"
+    mod.QUEUE_DIR = "${QUEUE_DIR}"
+    mod.YTDLP = "${WORKDIR}/yt-dlp"
+    mod.PROXY_FILE = "${WORKDIR}/proxy_pool.txt"
+    mod.COOKIE_POOL_DIR = "${WORKDIR}/cookie_pool"
+    sys.modules["downloader"] = mod
+    sys.argv = ["downloader", "--threads", "${DL_THREADS}", "--max-queue", "${DL_MAX_QUEUE}", "--queue-dir", "${QUEUE_DIR}"]
+    spec.loader.exec_module(mod)
 PYEOF
 
     nohup "$PYTHON" "${WORKDIR}/run_downloader.py" > "${LOGDIR}/downloader.log" 2>&1 &
@@ -119,27 +120,29 @@ start_transcribers() {
     log "Starting ${NUM_GPUS} transcribers..."
 
     cat > "${WORKDIR}/run_transcriber.py" << PYEOF
-import os, sys, sqlite3
-os.chdir("${REPO}")
-sys.path.insert(0, "${REPO}/src")
+import os, sys, sqlite3, multiprocessing
 
-DB_PATH = "${DB_PATH}"
-QUEUE_DIR = "${QUEUE_DIR}"
+if __name__ == "__main__":
+    multiprocessing.set_start_method("spawn", force=True)
+    os.chdir("${REPO}")
+    sys.path.insert(0, "${REPO}/src")
 
-import transcribe_qwen as tq
-tq.DB_PATH = DB_PATH
-tq.QUEUE_DIR = QUEUE_DIR
+    DB_PATH = "${DB_PATH}"
+    QUEUE_DIR = "${QUEUE_DIR}"
 
-_orig = tq.get_db
-def patched_get_db():
-    conn = sqlite3.connect(DB_PATH, timeout=30)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=30000")
-    return conn
-tq.get_db = patched_get_db
+    import transcribe_qwen as tq
+    tq.DB_PATH = DB_PATH
+    tq.QUEUE_DIR = QUEUE_DIR
 
-sys.argv = ["transcribe_qwen", "--batch-size", "${BATCH_SIZE}", "--max-tokens", "${MAX_TOKENS}", "--queue-dir", QUEUE_DIR]
-tq.main()
+    def patched_get_db():
+        conn = sqlite3.connect(DB_PATH, timeout=30)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        return conn
+    tq.get_db = patched_get_db
+
+    sys.argv = ["transcribe_qwen", "--batch-size", "${BATCH_SIZE}", "--max-tokens", "${MAX_TOKENS}", "--queue-dir", QUEUE_DIR]
+    tq.main()
 PYEOF
 
     for gpu in $(seq 0 $((NUM_GPUS - 1))); do
