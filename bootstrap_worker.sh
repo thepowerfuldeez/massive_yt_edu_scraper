@@ -125,6 +125,8 @@ start_transcribers() {
         log "  Starting GPU $gpu..."
         WORK_DIR="$WORKDIR" \
         DB_PATH="$DB_PATH" \
+        HF_HUB_OFFLINE=1 \
+        TRANSFORMERS_OFFLINE=1 \
         CUDA_VISIBLE_DEVICES=$gpu \
         nohup "$PYTHON" "${REPO}/src/transcribe_qwen.py" \
             --batch-size "$BATCH_SIZE" \
