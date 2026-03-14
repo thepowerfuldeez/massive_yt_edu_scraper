@@ -22,8 +22,7 @@ CLAIM_BATCH = 10
 AUDIO_SPEED = 1.2
 MAX_DOWNLOAD_RETRIES = 3
 
-# Proxy rotation: proxy_pool.txt has fast ISP proxies first, slow fallbacks after.
-# Each GPU gets assigned a primary fast proxy. On failure, falls back to others.
+# Proxy rotation: proxy_pool.txt, one per line. Each GPU gets a primary proxy.
 PROXY_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "proxy_pool.txt")
 
 def load_proxy_pool():

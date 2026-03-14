@@ -3,6 +3,7 @@
 ## Architecture
 
 Two-stage pipeline on 8x H200:
+1. **Downloader** (`src/downloader.py`) — N CPU threads, yt-dlp → `audio_queue/`
 2. **Transcribers** (`src/transcribe_qwen.py`) — 8x GPU, Qwen3-ASR-1.7B via offline vLLM (one model per GPU)
 3. **Discovery** — CC channel crawl (yt-dlp) + YouTube Data API
 
@@ -17,7 +18,6 @@ uv pip install -e "." --index-strategy unsafe-best-match
 apt-get install -y ffmpeg   # needed for webm→opus conversion
 
 # Config files (gitignored):
-# - proxy_pool.txt: http://user:pass@ip:port (one per line)
 # - .env: YT_API_KEY=...
 ```
 
@@ -45,14 +45,6 @@ python3 src/s3_sync.py merge  --remote-db /path/to/remote.db   # merge results
 ## yt-dlp Flags
 
 Always pass: `--js-runtimes node --remote-components ejs:github --no-check-certificates`
-
-
-File: `proxy_pool.txt`. Format: `http://user:pass@ip:port`
-
-- - Max ~16 concurrent downloads per subnet (2 threads/GPU x 8 GPUs)
-
-
-
 
 ## Download Pipeline
 
@@ -105,6 +97,6 @@ nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader
 ## Performance Notes
 
 - 8x H200 with Qwen3-ASR: ~65-95x realtime per GPU (batch=8)
-- Downloader: ~900/hr with 16 proxies
+- Downloader: ~900/hr
 - First batch per GPU is slow (CUDA graph capture + compile warmup)
 - atempo 1.2x saves 17% GPU time per video

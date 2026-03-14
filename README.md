@@ -13,7 +13,6 @@ source venv/bin/activate
 uv pip install -e "." --index-strategy unsafe-best-match
 
 # 2. Place config files
-cp proxy_pool.example.txt proxy_pool.txt   # edit with your proxies
 echo "YT_API_KEY=..." > .env               # for discovery scripts
 
 # 3. Bootstrap or pull DB
@@ -71,12 +70,6 @@ uv pip install -e "." --index-strategy unsafe-best-match
 Installs: torch (CUDA 12.8), vllm, qwen-asr, faster-whisper, yt-dlp, boto3, datasets, etc.
 
 ## Configuration
-
-
-One proxy per line, `http://user:pass@ip:port` format.
-Lines before `# Slow` are fast ISP proxies; lines after are fallbacks.
-
-
 
 
 ### Environment (`.env`)
@@ -182,7 +175,6 @@ CREATE TABLE videos (
 ├── launch_vllm.sh             # vLLM server mode
 ├── launch_discovery.sh        # Discovery crawlers
 ├── launch.sh                  # Legacy faster-whisper workers
-├── proxy_pool.txt             # Proxy config (gitignored)
 ├── .env                       # API keys (gitignored)
 └── src/
     ├── downloader.py          # Download-only pipeline (N threads)
@@ -194,7 +186,6 @@ CREATE TABLE videos (
     ├── discover_related.py    # Related video walking
     ├── quality_filter.py      # 40+ reject patterns, priority scoring
     ├── batch_license_scan.py  # YouTube API license scanning
-    ├── convert_cookies.py     # JSON → Netscape cookie conversion
     ├── reconstruct_queue.py   # Rebuild DB from HuggingFace datasets
     ├── export_parquet.py      # Export to local parquet
     ├── export_hf.py           # Export + push to HuggingFace
