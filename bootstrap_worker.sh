@@ -75,7 +75,16 @@ setup() {
     # 6. Symlink yt-dlp
     ln -sf "${REPO}/venv/bin/yt-dlp" "${WORKDIR}/yt-dlp"
 
-    # 7. Show status
+    # 7. Pull model weights from S3 (avoids HF rate limits)
+    MODEL_CACHE="${HOME}/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B"
+    if [ ! -d "$MODEL_CACHE/blobs" ] || [ $(du -sm "$MODEL_CACHE" 2>/dev/null | cut -f1) -lt 3000 ]; then
+        log "Pulling Qwen3-ASR model from S3..."
+        mkdir -p "$MODEL_CACHE"
+        aws s3 sync "s3://${S3_BUCKET}/${S3_PREFIX}/models/Qwen3-ASR-1.7B/" "$MODEL_CACHE/" --quiet
+        log "Model cache ready ($(du -sh $MODEL_CACHE | cut -f1))"
+    fi
+
+    # 8. Show status
     log "Setup complete."
     "$PYTHON" -c "
 import sqlite3
