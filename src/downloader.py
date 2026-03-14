@@ -84,19 +84,29 @@ def mark_proxy_fail(proxy):
             print(f"[downloader] Proxy {ip} failed {n}x", flush=True)
 
 
+# === Cookie pool ===
+COOKIE_POOL_DIR = os.path.join(WORK_DIR, "cookie_pool")
+
+
+def load_cookie_pool():
+    if not os.path.isdir(COOKIE_POOL_DIR):
         return []
-    # Exclude expired/ subdirectory
+    files = sorted(glob.glob(os.path.join(COOKIE_POOL_DIR, "*.txt")))
     files = [f for f in files if "/expired/" not in f]
+    print(f"[downloader] Cookie pool: {len(files)} cookies", flush=True)
     return files
 
+_cookie_pool = load_cookie_pool()
 _cookie_idx = 0
 _cookie_lock = threading.Lock()
 
 
 def get_cookie():
     global _cookie_idx
+    if not _cookie_pool:
         return None
     with _cookie_lock:
+        f = _cookie_pool[_cookie_idx % len(_cookie_pool)]
         _cookie_idx += 1
     return f
 

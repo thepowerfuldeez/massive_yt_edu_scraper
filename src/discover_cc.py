@@ -15,6 +15,7 @@ from quality_filter import is_educational, get_priority, MIN_DURATION
 
 DB_PATH = os.path.expanduser("~/academic_transcriptions/massive_production.db")
 YTDLP = os.path.expanduser("~/academic_transcriptions/yt-dlp")
+COOKIE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cookie_pool")
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=30)

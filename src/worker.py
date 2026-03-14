@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
+"""GPU worker: faster-whisper (CTranslate2) transcription pipeline.
 
 Architecture:
+- N prefetch threads download audio via yt-dlp
 - Main thread transcribes with faster-whisper on a single GPU
 - SQLite is the queue: atomic UPDATE...RETURNING claims
-
-- Worker selects cookies based on GPU_ID % num_cookies
 """
 import os, sys, time, random, sqlite3, subprocess, glob, threading, queue, traceback
 import numpy as np
@@ -90,25 +90,34 @@ def mark_proxy_fail(proxy):
         if n >= 3:
             print(f"[{WORKER_TAG}] Proxy {proxy.split('@')[-1]} failed {n}x, will try next", flush=True)
 
-# Each download thread picks a cookie round-robin from the pool.
-# On consecutive failures, rotate to next cookie and back off.
 import shutil
 
+COOKIE_POOL_DIR = os.path.join(WORK_DIR, "cookie_pool")
 
+
+def load_cookie_pool():
+    """Load all cookie files from cookie_pool/ directory."""
+    if not os.path.isdir(COOKIE_POOL_DIR):
         return []
+    files = sorted(glob.glob(os.path.join(COOKIE_POOL_DIR, "*.txt")))
+    print(f"[{WORKER_TAG}] Cookie pool: {len(files)} cookies loaded", flush=True)
     for f in files:
         print(f"  - {os.path.basename(f)}", flush=True)
     return files
 
+_cookie_pool = load_cookie_pool()
 _cookie_lock = threading.Lock()
-_cookie_counter = GPU_ID * 2 + INSTANCE  # offset so each instance starts on a different cookie
+_cookie_counter = GPU_ID * 2 + INSTANCE
 
 def get_thread_cookie_file(thread_idx):
     """Return a per-thread cookie file copied from the pool (round-robin)."""
     global _cookie_counter
+    if not _cookie_pool:
         return None
     with _cookie_lock:
+        idx = _cookie_counter % len(_cookie_pool)
         _cookie_counter += 1
+    src = _cookie_pool[idx]
     dst = os.path.join(WORK_DIR, f"cookies_gpu{GPU_ID}_t{thread_idx}.txt")
     shutil.copy2(src, dst)
     print(f"[{WORKER_TAG}] Thread {thread_idx} using cookie: {os.path.basename(src)}", flush=True)
