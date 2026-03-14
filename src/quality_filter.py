@@ -390,9 +390,12 @@ EDU_PRIORITY_7 = re.compile('|'.join([
 ]), re.IGNORECASE)
 
 
+MIN_DURATION = 300  # 5 min
+
+
 def is_educational(title, duration=None):
     """Returns False if video should be rejected."""
-    if duration and duration < 900:  # <15min
+    if duration and duration < MIN_DURATION:
         return False
     if not title:
         return False
@@ -413,46 +416,122 @@ def get_priority(title):
     return 5
 
 
+def classify_content(title):
+    """Classify video content category from title."""
+    if not title:
+        return None
+    t = title
+    if re.search(r'\b(university|universit[àéy]|Universität|universidad|universidade)\b', t, re.I):
+        return 'university_lecture'
+    if re.search(r'\b(ICML|NeurIPS|CVPR|ICLR|ACL|AAAI|SIGCOMM|USENIX|CHI|SIGGRAPH|conference)\b', t, re.I):
+        return 'conference'
+    if re.search(r'\bMIT\b.*\b(OCW|OpenCourseWare|\d+\.\d+)\b', t):
+        return 'university_lecture'
+    if re.search(r'\b(NPTEL|Coursera|edX|Khan Academy|OpenCourseWare)\b', t, re.I):
+        return 'mooc'
+    if re.search(r'\b(Lecture|Lec)\s+\d+\b', t, re.I):
+        return 'university_lecture'
+    if re.search(r'\b(course|full course|complete course|bootcamp)\b', t, re.I):
+        return 'course'
+    if re.search(r'\b(tutorial|how to|beginner|crash course)\b', t, re.I):
+        return 'tutorial'
+    if re.search(r'\b(seminar|workshop|masterclass|webinar)\b', t, re.I):
+        return 'seminar'
+    if re.search(r'\b(documentary|history of|science of)\b', t, re.I):
+        return 'documentary'
+    if re.search(r'\b(TED|TEDx|talk|presentation|keynote)\b', t, re.I):
+        return 'talk'
+    if re.search(r'\b(podcast|interview|discussion|panel)\b', t, re.I):
+        return 'podcast'
+    return None
+
+
 def retroactive_clean(db_path):
-    """Apply filters retroactively to existing queue."""
+    """Apply filters and enrich metadata retroactively on the queue."""
     import sqlite3
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = sqlite3.connect(db_path, timeout=60)
     conn.execute("PRAGMA journal_mode=WAL")
-    
-    # Get all pending videos
-    rows = conn.execute("SELECT video_id, title, duration_seconds, priority FROM videos WHERE status='pending'").fetchall()
-    
+    conn.execute("PRAGMA busy_timeout=60000")
+
+    # Process pending + downloaded (not completed/error — those are done)
+    rows = conn.execute(
+        "SELECT video_id, title, duration_seconds, priority, content_category "
+        "FROM videos WHERE status IN ('pending', 'downloaded')"
+    ).fetchall()
+
     rejected = 0
     upgraded = 0
     downgraded = 0
-    
-    for vid, title, dur, old_pri in rows:
+    categorized = 0
+    batch_size = 5000
+    updates = []
+
+    for vid, title, dur, old_pri, old_cat in rows:
         if not is_educational(title, dur):
-            conn.execute("UPDATE videos SET priority=0, status='rejected' WHERE video_id=?", (vid,))
+            updates.append(('reject', vid))
             rejected += 1
             continue
-        
+
         new_pri = get_priority(title)
-        if new_pri != old_pri:
-            conn.execute("UPDATE videos SET priority=? WHERE video_id=?", (new_pri, vid))
+        new_cat = classify_content(title) if not old_cat else old_cat
+
+        if new_pri != old_pri or (new_cat and new_cat != old_cat):
+            updates.append(('update', vid, new_pri, new_cat))
             if new_pri > old_pri:
                 upgraded += 1
-            else:
+            elif new_pri < old_pri:
                 downgraded += 1
-    
+            if new_cat and new_cat != old_cat:
+                categorized += 1
+
+        if len(updates) >= batch_size:
+            _flush_updates(conn, updates)
+            updates.clear()
+
+    if updates:
+        _flush_updates(conn, updates)
+
     conn.commit()
-    
+
     stats = dict(conn.execute("SELECT status, count(*) FROM videos GROUP BY status").fetchall())
-    pri_dist = conn.execute("SELECT priority, count(*) FROM videos WHERE status='pending' GROUP BY priority ORDER BY priority DESC").fetchall()
-    
+    pri_dist = conn.execute(
+        "SELECT priority, count(*) FROM videos WHERE status='pending' "
+        "GROUP BY priority ORDER BY priority DESC"
+    ).fetchall()
+    cat_dist = conn.execute(
+        "SELECT content_category, count(*) FROM videos "
+        "WHERE status IN ('pending','downloaded') AND content_category IS NOT NULL "
+        "GROUP BY content_category ORDER BY count(*) DESC"
+    ).fetchall()
+
     conn.close()
-    
+
     print(f"Retroactive clean complete:")
-    print(f"  Rejected: {rejected}")
-    print(f"  Upgraded priority: {upgraded}")
-    print(f"  Downgraded priority: {downgraded}")
-    print(f"  Status distribution: {stats}")
-    print(f"  Priority distribution: {dict(pri_dist)}")
+    print(f"  Rejected: {rejected:,}")
+    print(f"  Upgraded priority: {upgraded:,}")
+    print(f"  Downgraded priority: {downgraded:,}")
+    print(f"  Categorized: {categorized:,}")
+    print(f"  Status: {stats}")
+    print(f"  Priority: {dict(pri_dist)}")
+    print(f"  Categories: {dict(cat_dist)}")
+
+
+def _flush_updates(conn, updates):
+    for item in updates:
+        if item[0] == 'reject':
+            conn.execute(
+                "UPDATE videos SET priority=0, status='rejected' WHERE video_id=?",
+                (item[1],))
+        elif item[0] == 'update':
+            _, vid, pri, cat = item
+            if cat:
+                conn.execute(
+                    "UPDATE videos SET priority=?, content_category=? WHERE video_id=?",
+                    (pri, cat, vid))
+            else:
+                conn.execute(
+                    "UPDATE videos SET priority=? WHERE video_id=?",
+                    (pri, vid))
 
 
 if __name__ == "__main__":

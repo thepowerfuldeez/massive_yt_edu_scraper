@@ -10,28 +10,11 @@ Strategy:
 import sqlite3, subprocess, json, os, time, random, re, sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from quality_filter import is_educational, get_priority, MIN_DURATION
+
 DB_PATH = os.path.expanduser("~/academic_transcriptions/massive_production.db")
 YTDLP = os.path.expanduser("~/academic_transcriptions/yt-dlp")
-MIN_DURATION = 300
-
-REJECT_PATTERNS = re.compile(
-    r'\b(music video|official video|lyric|trailer|reaction|unboxing|prank|asmr|mukbang|'
-    r'tiktok|shorts|#shorts|haul|vlog|grwm|day in my life|'
-    r'fortnite|minecraft gameplay|roblox|gta v|gaming|let.s play|walkthrough|playthrough|'
-    r'full movie|full episode|movie clip|behind the scenes|bloopers|'
-    r'live stream|livestream|24 hour challenge|'
-    r'compilation|funny moments|try not to laugh|satisfying|oddly satisfying|'
-    r'sermon|prayer|worship|bible study|quran|gospel|church service)\b',
-    re.IGNORECASE
-)
-
-EDU_BOOST = re.compile(
-    r'\b(lecture|course|tutorial|class|seminar|workshop|bootcamp|masterclass|'
-    r'university|professor|MIT|Stanford|Harvard|Yale|Berkeley|Oxford|Cambridge|'
-    r'OpenCourseWare|NPTEL|khan academy|'
-    r'introduction to|fundamentals|chapter \d|lesson \d|week \d|part \d|module \d)\b',
-    re.IGNORECASE
-)
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
@@ -43,11 +26,6 @@ def get_cookie():
     if not cookies: return None
     return os.path.join(COOKIE_DIR, random.choice(cookies))
 
-def is_good(title, duration):
-    if duration and duration < MIN_DURATION: return False
-    if REJECT_PATTERNS.search(title or ''): return False
-    return True
-
 def insert_videos(videos, source='cc_discovery'):
     if not videos: return 0
     conn = get_db()
@@ -56,8 +34,8 @@ def insert_videos(videos, source='cc_discovery'):
         title = v.get('title', '')
         dur = v.get('duration') or 0
         vid = v.get('id', '')
-        if not vid or not is_good(title, dur): continue
-        pri = 9 if EDU_BOOST.search(title) else 7  # Higher base priority for CC-adjacent
+        if not vid or not is_educational(title, dur): continue
+        pri = max(get_priority(title), 7)  # CC-adjacent gets at least P7
         try:
             conn.execute(
                 "INSERT INTO videos (video_id, title, course, university, url, duration_seconds, status, priority) "

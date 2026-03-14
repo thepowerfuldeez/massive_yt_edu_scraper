@@ -10,43 +10,19 @@ Uses completed/queued videos as seeds → fetch related → find playlists → c
 This is the key to going from 100K → 1M+ quality educational videos.
 """
 
-import sqlite3, subprocess, json, os, time, random, re
+import sqlite3, subprocess, json, os, sys, time, random, re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from quality_filter import is_educational, get_priority, MIN_DURATION
 
 DB_PATH = os.path.expanduser("~/academic_transcriptions/massive_production.db")
 YTDLP = os.path.expanduser("~/academic_transcriptions/yt-dlp")
-MIN_DURATION = 900  # 15 min
-
-REJECT_PATTERNS = re.compile(
-    r'\b(music video|official video|lyric|trailer|reaction|unboxing|prank|asmr|mukbang|'
-    r'tiktok|shorts|#shorts|haul|vlog|grwm|day in my life|'
-    r'fortnite|minecraft gameplay|roblox|gta v|gaming|let\'s play|walkthrough|playthrough|'
-    r'full movie|full episode|movie clip|behind the scenes|bloopers|'
-    r'live stream|livestream|24 hour challenge|'
-    r'compilation|funny moments|try not to laugh|satisfying|oddly satisfying)\b',
-    re.IGNORECASE
-)
-
-EDU_BOOST = re.compile(
-    r'\b(lecture|course|tutorial|class|seminar|workshop|bootcamp|masterclass|'
-    r'university|professor|MIT|Stanford|Harvard|Yale|Berkeley|Oxford|Cambridge|'
-    r'OpenCourseWare|NPTEL|khan academy|'
-    r'introduction to|fundamentals|chapter \d|lesson \d|week \d|part \d|module \d|'
-    r'лекция|курс|Vorlesung|cours|lezione|wykład|강의|講義|课程)\b',
-    re.IGNORECASE
-)
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.execute("PRAGMA journal_mode=WAL")
     return conn
-
-def is_good(title, duration):
-    if duration and duration < MIN_DURATION:
-        return False
-    if REJECT_PATTERNS.search(title or ''):
-        return False
-    return True
 
 def insert_videos(videos, source='related'):
     if not videos: return 0
@@ -55,9 +31,9 @@ def insert_videos(videos, source='related'):
     for v in videos:
         title = v.get('title', '')
         dur = v.get('duration', 0)
-        if not is_good(title, dur):
+        if not is_educational(title, dur):
             continue
-        pri = 8 if EDU_BOOST.search(title) else 5
+        pri = get_priority(title)
         try:
             conn.execute(
                 "INSERT INTO videos (video_id, title, course, university, url, duration_seconds, status, priority) "

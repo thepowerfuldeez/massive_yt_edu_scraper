@@ -14,29 +14,11 @@ then paginate playlistItems to get all video IDs.
 """
 import sqlite3, os, sys, time, json, urllib.request, urllib.error, re, random
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from quality_filter import is_educational, get_priority
+
 DB = os.path.expanduser("~/academic_transcriptions/massive_production.db")
 API_KEY = os.environ.get("YT_API_KEY", "")
-MIN_DURATION = 300
-
-REJECT_PATTERNS = re.compile(
-    r'\b(music video|official video|lyric|trailer|reaction|unboxing|prank|asmr|mukbang|'
-    r'tiktok|shorts|#shorts|haul|vlog|grwm|day in my life|'
-    r'fortnite|minecraft gameplay|roblox|gta v|gaming|let.s play|walkthrough|playthrough|'
-    r'full movie|full episode|movie clip|behind the scenes|bloopers|'
-    r'live stream|livestream|24 hour challenge|'
-    r'compilation|funny moments|try not to laugh|satisfying|oddly satisfying|'
-    r'sermon|prayer|worship|bible study|quran|gospel|church service|'
-    r'conspiracy|flat earth|anti.vax|miracle cure)\b',
-    re.IGNORECASE
-)
-
-EDU_BOOST = re.compile(
-    r'\b(lecture|course|tutorial|class|seminar|workshop|bootcamp|masterclass|'
-    r'university|professor|MIT|Stanford|Harvard|Yale|Berkeley|Oxford|Cambridge|'
-    r'OpenCourseWare|NPTEL|khan academy|Coursera|edX|'
-    r'introduction to|fundamentals|chapter \d|lesson \d|week \d|part \d|module \d)\b',
-    re.IGNORECASE
-)
 
 EXPLORED_FILE = os.path.expanduser("~/academic_transcriptions/cc_api_explored.txt")
 
@@ -123,9 +105,9 @@ def insert_videos(videos, source="cc_api"):
         vid = v.get("id", "")
         if not vid:
             continue
-        if REJECT_PATTERNS.search(title):
+        if not is_educational(title):
             continue
-        pri = 8 if EDU_BOOST.search(title) else 6
+        pri = max(get_priority(title), 6)  # CC channel videos get at least P6
         ch_id = v.get("channel_id", "")
         published = v.get("published", "")
         try:
