@@ -97,30 +97,19 @@ print(f'  DB: {n:,} pending videos')
 
 # ---- Downloader ----
 start_downloader() {
-    if pgrep -f "downloader.*worker_${WORKER_ID}" > /dev/null 2>&1; then
+    if pgrep -f "src/downloader.py.*--queue-dir.*worker_${WORKER_ID}" > /dev/null 2>&1; then
         log "Downloader already running"; return
     fi
     log "Starting downloader (${DL_THREADS} threads)..."
 
-    cat > "${WORKDIR}/run_downloader.py" << PYEOF
-import os, sys, importlib.util
-
-if __name__ == "__main__":
-    os.chdir("${REPO}")
-    spec = importlib.util.spec_from_file_location("downloader", "${REPO}/src/downloader.py")
-    mod = importlib.util.module_from_spec(spec)
-    mod.DB_PATH = "${DB_PATH}"
-    mod.WORK_DIR = "${WORKDIR}"
-    mod.QUEUE_DIR = "${QUEUE_DIR}"
-    mod.YTDLP = "${WORKDIR}/yt-dlp"
-    mod.PROXY_FILE = "${WORKDIR}/proxy_pool.txt"
-    mod.COOKIE_POOL_DIR = "${WORKDIR}/cookie_pool"
-    sys.modules["downloader"] = mod
-    sys.argv = ["downloader", "--threads", "${DL_THREADS}", "--max-queue", "${DL_MAX_QUEUE}", "--queue-dir", "${QUEUE_DIR}"]
-    spec.loader.exec_module(mod)
-PYEOF
-
-    nohup "$PYTHON" "${WORKDIR}/run_downloader.py" > "${LOGDIR}/downloader.log" 2>&1 &
+    WORK_DIR="$WORKDIR" \
+    DB_PATH="$DB_PATH" \
+    PROXY_FILE="${WORKDIR}/proxy_pool.txt" \
+    nohup "$PYTHON" "${REPO}/src/downloader.py" \
+        --threads "$DL_THREADS" \
+        --max-queue "$DL_MAX_QUEUE" \
+        --queue-dir "$QUEUE_DIR" \
+        > "${LOGDIR}/downloader.log" 2>&1 &
     log "  PID: $! -> ${LOGDIR}/downloader.log"
 }
 
@@ -128,39 +117,19 @@ PYEOF
 start_transcribers() {
     log "Starting ${NUM_GPUS} transcribers..."
 
-    cat > "${WORKDIR}/run_transcriber.py" << PYEOF
-import os, sys, sqlite3, multiprocessing
-
-if __name__ == "__main__":
-    multiprocessing.set_start_method("spawn", force=True)
-    os.chdir("${REPO}")
-    sys.path.insert(0, "${REPO}/src")
-
-    DB_PATH = "${DB_PATH}"
-    QUEUE_DIR = "${QUEUE_DIR}"
-
-    import transcribe_qwen as tq
-    tq.DB_PATH = DB_PATH
-    tq.QUEUE_DIR = QUEUE_DIR
-
-    def patched_get_db():
-        conn = sqlite3.connect(DB_PATH, timeout=30)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        return conn
-    tq.get_db = patched_get_db
-
-    sys.argv = ["transcribe_qwen", "--batch-size", "${BATCH_SIZE}", "--max-tokens", "${MAX_TOKENS}", "--queue-dir", QUEUE_DIR]
-    tq.main()
-PYEOF
-
     for gpu in $(seq 0 $((NUM_GPUS - 1))); do
         mem=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits -i $gpu 2>/dev/null | tr -d ' ')
         if [ -n "$mem" ] && [ "$mem" -gt 50000 ] 2>/dev/null; then
             log "  GPU $gpu in use, skipping"; continue
         fi
         log "  Starting GPU $gpu..."
-        CUDA_VISIBLE_DEVICES=$gpu nohup "$PYTHON" "${WORKDIR}/run_transcriber.py" \
+        WORK_DIR="$WORKDIR" \
+        DB_PATH="$DB_PATH" \
+        CUDA_VISIBLE_DEVICES=$gpu \
+        nohup "$PYTHON" "${REPO}/src/transcribe_qwen.py" \
+            --batch-size "$BATCH_SIZE" \
+            --max-tokens "$MAX_TOKENS" \
+            --queue-dir "$QUEUE_DIR" \
             > "${LOGDIR}/transcriber_gpu${gpu}.log" 2>&1 &
         log "    PID: $!"
         sleep 5
@@ -202,8 +171,8 @@ print(f'  => Audio queue: {q} files')
 # ---- Stop ----
 stop_all() {
     log "Stopping worker ${WORKER_ID}..."
-    pkill -f "run_downloader.py" 2>/dev/null || true
-    pkill -f "run_transcriber.py" 2>/dev/null || true
+    pkill -f "downloader.py.*worker_${WORKER_ID}" 2>/dev/null || true
+    pkill -f "transcribe_qwen.py.*worker_${WORKER_ID}" 2>/dev/null || true
     nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | while read pid; do
         kill -9 "$pid" 2>/dev/null || true
     done

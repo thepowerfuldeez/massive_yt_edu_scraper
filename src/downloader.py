@@ -14,11 +14,11 @@ Usage:
 """
 import os, sys, time, random, sqlite3, subprocess, glob, threading, queue, argparse, re, signal
 
-DB_PATH = os.path.expanduser("~/academic_transcriptions/massive_production.db")
-WORK_DIR = os.path.expanduser("~/academic_transcriptions")
+WORK_DIR = os.environ.get("WORK_DIR", os.path.expanduser("~/academic_transcriptions"))
+DB_PATH = os.environ.get("DB_PATH", os.path.join(WORK_DIR, "massive_production.db"))
 YTDLP = os.path.join(WORK_DIR, "yt-dlp")
 QUEUE_DIR = os.path.join(WORK_DIR, "audio_queue")
-PROXY_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "proxy_pool.txt")
+PROXY_FILE = os.environ.get("PROXY_FILE", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "proxy_pool.txt"))
 
 AUDIO_SPEED = 1.2
 ATEMPO_THRESHOLD = 1800  # apply atempo only for >30min videos

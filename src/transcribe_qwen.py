@@ -16,8 +16,9 @@ Usage:
 import os, sys, time, sqlite3, glob, argparse, traceback, subprocess, json, base64
 import urllib.request, urllib.error
 
-DB_PATH = os.path.expanduser("~/academic_transcriptions/massive_production.db")
-QUEUE_DIR = os.path.expanduser("~/academic_transcriptions/audio_queue")
+_WORK_DIR = os.environ.get("WORK_DIR", os.path.expanduser("~/academic_transcriptions"))
+DB_PATH = os.environ.get("DB_PATH", os.path.join(_WORK_DIR, "massive_production.db"))
+QUEUE_DIR = os.path.join(_WORK_DIR, "audio_queue")
 
 # Tokens per minute of audio at P99 ≈ 330, with margin
 TOKENS_PER_MIN = 380
