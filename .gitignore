@@ -12,6 +12,7 @@ venv/
 __pycache__/
 *.pyc
 *.egg-info/
+OPERATIONS.md
 .env
 hf_export/
 data/
