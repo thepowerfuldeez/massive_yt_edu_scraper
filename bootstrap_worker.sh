@@ -56,7 +56,11 @@ setup() {
         uv pip install -e "." --python venv/bin/python3 --index-strategy unsafe-best-match
     fi
 
-    # 3. System deps
+    # 3. Update yt-dlp to latest (JS challenge solvers break often)
+    log "Updating yt-dlp..."
+    uv pip install -U yt-dlp --python venv/bin/python3 --index-strategy unsafe-best-match --quiet
+
+    # 4. System deps
     which ffmpeg > /dev/null 2>&1 || (log "Installing ffmpeg..." && apt-get install -y ffmpeg > /dev/null 2>&1)
 
     # 4. Create workdir
