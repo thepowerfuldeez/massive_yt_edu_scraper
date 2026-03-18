@@ -62,20 +62,22 @@ setup() {
     # 4. Create workdir
     mkdir -p "$WORKDIR" "$QUEUE_DIR" "$LOGDIR" "$EXPORT_DIR"
 
-    # 5. Pull shard DB + proxies from S3
+    # 5. Pull shard DB from S3 (only if missing)
     if [ ! -f "$DB_PATH" ]; then
         log "Pulling shard DB from S3..."
         aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/worker_${WORKER_ID}/massive_production.db" "$DB_PATH"
     fi
-    if [ ! -f "${WORKDIR}/proxy_pool.txt" ]; then
-        log "Pulling proxy config from S3..."
-        aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/worker_${WORKER_ID}/proxy_pool.txt" "${WORKDIR}/proxy_pool.txt"
-    fi
 
-    # 6. Symlink yt-dlp
+    # 6. Always sync proxies + cookies from S3 (may be updated)
+    log "Syncing proxies + cookies from S3..."
+    aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/worker_${WORKER_ID}/proxy_pool.txt" "${WORKDIR}/proxy_pool.txt" --quiet
+    mkdir -p "${WORKDIR}/cookie_pool"
+    aws s3 sync "s3://${S3_BUCKET}/${S3_PREFIX}/worker_${WORKER_ID}/cookie_pool/" "${WORKDIR}/cookie_pool/" --quiet
+
+    # 7. Symlink yt-dlp
     ln -sf "${REPO}/venv/bin/yt-dlp" "${WORKDIR}/yt-dlp"
 
-    # 7. Pull model weights from S3 (avoids HF rate limits)
+    # 8. Pull model weights from S3 (avoids HF rate limits)
     MODEL_CACHE="${HOME}/.cache/huggingface/hub/models--Qwen--Qwen3-ASR-1.7B"
     if [ ! -d "$MODEL_CACHE/blobs" ] || [ $(du -sm "$MODEL_CACHE" 2>/dev/null | cut -f1) -lt 3000 ]; then
         log "Pulling Qwen3-ASR model from S3..."
