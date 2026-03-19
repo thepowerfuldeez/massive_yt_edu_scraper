@@ -62,6 +62,13 @@ setup() {
 
     # 4. System deps
     which ffmpeg > /dev/null 2>&1 || (log "Installing ffmpeg..." && apt-get install -y ffmpeg > /dev/null 2>&1)
+    # Node.js 20+ required for yt-dlp PO token generation (bgutil-ytdlp-pot-provider)
+    node_ver=$(node --version 2>/dev/null | grep -oP '(?<=v)\d+' || echo "0")
+    if [ "$node_ver" -lt 20 ]; then
+        log "Installing Node.js 20..."
+        curl -fsSL https://deb.nodesource.com/setup_20.x | bash - > /dev/null 2>&1
+        apt-get install -y nodejs > /dev/null 2>&1
+    fi
 
     # 4. Create workdir
     mkdir -p "$WORKDIR" "$QUEUE_DIR" "$LOGDIR" "$EXPORT_DIR"
@@ -165,12 +172,12 @@ print(f'  => Audio queue: {q} files')
 
     echo ""
     for gpu in $(seq 0 $((NUM_GPUS - 1))); do
-        last=$(grep "\[batch\]" "${LOGDIR}/transcriber_gpu${gpu}.log" 2>/dev/null | tail -1)
+        last=$(grep "\[batch\]" "${LOGDIR}/transcriber_gpu${gpu}.log" 2>/dev/null | tail -1 || true)
         [ -n "$last" ] && echo "  GPU $gpu: $last"
     done
 
     echo ""
-    grep "\[T" "${LOGDIR}/downloader.log" 2>/dev/null | grep "#" | tail -2
+    grep "\[T" "${LOGDIR}/downloader.log" 2>/dev/null | grep "#" | tail -2 || true
 
     echo ""
     nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader 2>/dev/null

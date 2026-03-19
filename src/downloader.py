@@ -199,14 +199,15 @@ def download_audio(video_id, tmp_dir, thread_idx, cookie_file=None):
 
     for attempt in range(MAX_DOWNLOAD_RETRIES):
         try:
-            cmd = [YTDLP, "--js-runtimes", "node", "--remote-components", "ejs:github"]
+            cmd = [YTDLP, "--js-runtimes", "node", "--remote-components", "ejs:github",
+                   "--extractor-args", "youtube:player_client=web;fetch_pot=always"]
             proxy = get_proxy(thread_idx)
             if proxy:
                 cmd += ["--proxy", proxy]
             if cookie_file:
                 cmd += ["--cookies", cookie_file]
             cmd += [
-                "-f", "ba[abr<=96]/wa/ba",
+                "-f", "ba[abr<=96]/wa/ba/worst[height<=360]",
                 "-o", out_template, "--no-playlist",
                 "--socket-timeout", "30", "--retries", "3",
                 "--no-check-certificates",
@@ -241,7 +242,7 @@ def download_audio(video_id, tmp_dir, thread_idx, cookie_file=None):
                     wait = (2 ** attempt) * 5 + random.random() * 5
                     time.sleep(wait)
                     continue
-                return None
+                return ("error", f"download_failed: {err_msg}" if err_msg else "download_failed: no output file (rc={proc.returncode})")
 
             if proxy:
                 mark_proxy_ok(proxy)
@@ -259,6 +260,7 @@ def download_audio(video_id, tmp_dir, thread_idx, cookie_file=None):
             return out_path, duration
 
         except Exception as e:
+            last_err = str(e)[:200]
             for f in glob.glob(os.path.join(tmp_dir, f"{video_id}.*")):
                 try:
                     os.unlink(f)
@@ -268,8 +270,8 @@ def download_audio(video_id, tmp_dir, thread_idx, cookie_file=None):
                 wait = (2 ** attempt) * 5 + random.random() * 5
                 time.sleep(wait)
             else:
-                return None
-    return None
+                return ("error", f"download_exception: {last_err}")
+    return ("error", "download_failed: max retries exhausted")
 
 
 def apply_atempo(audio_path, video_id, duration, tmp_dir):
@@ -358,8 +360,9 @@ def download_thread(thread_idx):
 
             vid, title = row
             result = download_audio(vid, tmp_dir, thread_idx, cookie_file=cookie_file)
-            if result is None:
-                mark_error(vid, "download_failed")
+            if result is None or (isinstance(result, tuple) and result[0] == "error"):
+                err_reason = result[1] if isinstance(result, tuple) else "download_failed"
+                mark_error(vid, err_reason)
                 consec_fails += 1
                 if consec_fails >= 5:
                     cookie_file = get_cookie()
