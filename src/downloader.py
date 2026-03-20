@@ -36,7 +36,7 @@ BUCKETS = [
 ]
 
 
-# === Proxy pool ===
+# === Proxy pool with speed-based prioritization ===
 def load_proxy_pool():
     proxies = []
     try:
@@ -52,33 +52,60 @@ def load_proxy_pool():
         return []
 
 _proxies = load_proxy_pool()
-_proxy_failures = {}
+_proxy_failures = {}  # proxy -> consecutive fail count
+_proxy_times = {}     # proxy -> list of recent download times (seconds)
 _proxy_lock = threading.Lock()
+_PROXY_HISTORY = 20   # keep last N download times per proxy
+
+
+def _proxy_score(proxy):
+    """Lower is better. Based on avg download time + penalty for failures."""
+    fails = _proxy_failures.get(proxy, 0)
+    if fails >= 5:
+        return 9999
+    times = _proxy_times.get(proxy, [])
+    if not times:
+        return 50  # unknown = neutral, try it
+    avg = sum(times) / len(times)
+    return avg + fails * 30
 
 
 def get_proxy(thread_idx):
-    """Each thread gets its own dedicated proxy, fallback on failure."""
+    """Return fastest available proxy for this thread.
+
+    Threads still have affinity (start from thread_idx offset) but skip
+    slow/failing proxies in favor of faster ones."""
     with _proxy_lock:
         if not _proxies:
             return None
-        for offset in range(len(_proxies)):
-            idx = (thread_idx + offset) % len(_proxies)
-            proxy = _proxies[idx]
-            if _proxy_failures.get(proxy, 0) < 5:
-                return proxy
-        _proxy_failures.clear()
-        return _proxies[thread_idx % len(_proxies)]
+        # Sort by score, break ties by affinity to thread_idx
+        candidates = [(p, _proxy_score(p)) for p in _proxies]
+        candidates.sort(key=lambda x: x[1])
+        # Pick from top half, with thread affinity
+        top = max(len(candidates) // 2, 1)
+        idx = thread_idx % top
+        return candidates[idx][0]
 
 
-def mark_proxy_ok(proxy):
+def mark_proxy_ok(proxy, elapsed_seconds=None):
     with _proxy_lock:
         _proxy_failures.pop(proxy, None)
+        if elapsed_seconds is not None:
+            times = _proxy_times.setdefault(proxy, [])
+            times.append(elapsed_seconds)
+            if len(times) > _PROXY_HISTORY:
+                del times[:-_PROXY_HISTORY]
 
 
 def mark_proxy_fail(proxy):
     with _proxy_lock:
         _proxy_failures[proxy] = _proxy_failures.get(proxy, 0) + 1
         n = _proxy_failures[proxy]
+        # Also record a penalty time
+        times = _proxy_times.setdefault(proxy, [])
+        times.append(300)  # 5min penalty for failures
+        if len(times) > _PROXY_HISTORY:
+            del times[:-_PROXY_HISTORY]
         if n >= 3:
             ip = proxy.split("@")[-1] if "@" in proxy else proxy
             print(f"[downloader] Proxy {ip} failed {n}x", flush=True)
@@ -213,6 +240,7 @@ def download_audio(video_id, tmp_dir, thread_idx, cookie_file=None):
                 "--no-check-certificates",
                 f"https://www.youtube.com/watch?v={video_id}",
             ]
+            dl_start = time.monotonic()
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                      text=True, cwd=WORK_DIR, start_new_session=True)
             try:
@@ -224,6 +252,7 @@ def download_audio(video_id, tmp_dir, thread_idx, cookie_file=None):
                     proc.kill()
                 proc.wait()
                 raise
+            dl_elapsed = time.monotonic() - dl_start
 
             matches = [f for f in glob.glob(os.path.join(tmp_dir, f"{video_id}.*"))
                        if not f.endswith(".part")]
@@ -245,7 +274,7 @@ def download_audio(video_id, tmp_dir, thread_idx, cookie_file=None):
                 return ("error", f"download_failed: {err_msg}" if err_msg else "download_failed: no output file (rc={proc.returncode})")
 
             if proxy:
-                mark_proxy_ok(proxy)
+                mark_proxy_ok(proxy, dl_elapsed)
 
             # Get duration via ffprobe
             try:
@@ -444,7 +473,24 @@ def main():
                 rate = n / elapsed if elapsed > 0 else 0
             qsz = queue_size()
             print(f"\n[stats] {n} downloaded, {e} errors | {hrs:.0f} audio hrs | "
-                  f"{rate:.0f}/hr | queue={qsz} | {elapsed:.1f}h elapsed\n", flush=True)
+                  f"{rate:.0f}/hr | queue={qsz} | {elapsed:.1f}h elapsed", flush=True)
+            # Proxy speed report
+            with _proxy_lock:
+                ranked = []
+                for p in _proxies:
+                    times = _proxy_times.get(p, [])
+                    fails = _proxy_failures.get(p, 0)
+                    ok = [t for t in times if t < 290]
+                    avg = sum(ok) / len(ok) if ok else 999
+                    ranked.append((p, avg, len(ok), fails))
+                ranked.sort(key=lambda x: x[1])
+            if ranked:
+                print("[proxy-rank] avg_s  ok  fails  ip", flush=True)
+                for p, avg, ok, fails in ranked:
+                    ip = p.split("@")[-1] if "@" in p else p
+                    tag = " SLOW" if avg > 60 else ""
+                    print(f"  {avg:6.1f}s  {ok:3d}  {fails:5d}  {ip}{tag}", flush=True)
+            print("", flush=True)
     except KeyboardInterrupt:
         print("\n[downloader] Shutting down...", flush=True)
 
